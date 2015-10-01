@@ -31,16 +31,12 @@ class CassandraRealTimeIndex(
 
   val queue = collection.mutable.Queue.empty[IndexEntry]
 
-  case object CassandraDone
-  case object Repoll
-
   def allTimeWindowsClosed = nowFunc minus extendedTimeWindowLength
 
   def receive = { case _ => }
   context.become(polling(start = allTimeWindowsClosed, previousEvents = None))
 
   def polling(start: Instant, previousEvents: Option[Set[IndexEntry]]): Receive = {
-    println("Reading from " + start)
     var entries = TreeSet.empty[IndexEntry](Ordering.by { i => (i.window_start, i.persistenceId) })
     concatOpt(
       cassandraOps.readIndexEntriesSince(start),
@@ -71,7 +67,7 @@ class CassandraRealTimeIndex(
         val threshold = allTimeWindowsClosed
         context become polling(threshold, Some(entriesToRemember(threshold, entries)))
 
-      case Request =>
+      case Request(_) =>
         deliverQueue()
 
       case Cancel =>
@@ -117,6 +113,9 @@ class CassandraRealTimeIndex(
 }
 
 object CassandraRealTimeIndex {
+  private case object CassandraDone
+  private case object Repoll
+
   def toYearMonthDay(instant: Instant): Int = {
 	  import Calendar._
 

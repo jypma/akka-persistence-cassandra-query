@@ -1,29 +1,20 @@
 package akka.persistence.cassandra.query
 
-import org.scalatest.concurrent.ScalaFutures
-import java.time.Duration
-import org.scalatest.Matchers
-import org.scalatest.WordSpec
-import akka.persistence.cassandra.test.SharedActorSystem
-import akka.stream.scaladsl.Source
+import java.time.{ Duration, Instant }
+
+import scala.concurrent.duration.DurationInt
+
+import org.mockito.Mockito.{ mock, verify, when, atLeastOnce }
+import org.scalatest.{ Matchers, WordSpec }
+import org.scalatest.concurrent.{ Eventually, ScalaFutures }
+
 import akka.actor.Props
-import org.mockito.Mockito._
-import org.mockito.Matchers._
-import org.mockito.Matchers.{eq => is}
-import akka.persistence.cassandra.journal.CassandraJournalConfig
-import akka.persistence.cassandra.test.MockCassandra
-import akka.persistence.cassandra.Cassandra
-import akka.persistence.cassandra.Cassandra.RowMapper
-import akka.persistence.cassandra.Cassandra.PreparedSelectStatement
-import java.time.Instant
-import akka.stream.scaladsl.Sink
-import java.util.concurrent.ConcurrentLinkedQueue
-import scala.concurrent.duration._
-import org.scalatest.concurrent.Eventually
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
+import akka.persistence.cassandra.test.SharedActorSystem
+import akka.stream.scaladsl.{ Sink, Source }
 import akka.testkit.TestProbe
 
-class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem with MockCassandra {
+class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
   "CassandraRealTimeIndex" when {
 
     val                 noon = Instant.ofEpochSecond(1420113600) // Thu, 01 Jan 2015 12:00:00 GMT
@@ -52,7 +43,7 @@ class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFuture
 
 	    // Allow the publisher to pick up the initialContent (which it'll do shortly after having queried for initialTime)
       eventually {
-        verify(cassandraOps).readIndexEntriesSince(initialTime minus extTimeWindow)
+        verify(cassandraOps, atLeastOnce).readIndexEntriesSince(initialTime minus extTimeWindow)
       }
     }
 
