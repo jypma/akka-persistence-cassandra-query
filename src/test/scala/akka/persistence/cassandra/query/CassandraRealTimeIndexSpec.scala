@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import scala.concurrent.duration._
 import org.scalatest.concurrent.Eventually
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
+import akka.testkit.TestProbe
 
 class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem with MockCassandra {
   "CassandraRealTimeIndex" when {
@@ -38,7 +39,7 @@ class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFuture
     ) {
     	val extTimeWindow = Duration.ofSeconds(120)
 
-    	val emitted = new ConcurrentLinkedQueue[IndexEntry]
+    	val emitted = TestProbe()
 
     	@volatile var now = initialTime
 
@@ -47,13 +48,17 @@ class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFuture
 
 			val publisher = Source.actorPublisher(Props(
 			  new CassandraRealTimeIndex(cassandraOps, pollDelay = 1.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)
-	    )).runWith(Sink.foreach(emitted.add))
+	    )).runWith(Sink.actorRef(emitted.ref, "done"))
+
+	    // Allow the publisher to pick up the initialContent (which it'll do shortly after having queried for initialTime)
+      eventually {
+        verify(cassandraOps).readIndexEntriesSince(initialTime minus extTimeWindow)
+      }
     }
 
     "polling an empty database" should {
       "never emit any entries" in new Fixture {
-        Thread.sleep(50) // allow the actor to poll a few times
-        emitted should have size(0)
+        emitted.expectNoMsg(50.milliseconds)
       }
     }
 
@@ -61,25 +66,20 @@ class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFuture
       "never emit any entries" in new Fixture (
         initialContent = Set(mkIndexEntry(noon minusMillis 10, "foo"))
       ){
-        Thread.sleep(50)
         val soon = now plusMillis 50
         when(cassandraOps.readIndexEntriesSince(soon minus extTimeWindow)).thenReturn(Source(initialContent.toList))
         now = soon
-        Thread.sleep(50)
-        emitted should have size(0)
+        emitted.expectNoMsg(50.milliseconds)
       }
     }
 
     "discovering new entries between poll runs" should {
       "emit the newly found entries" in new Fixture {
-        Thread.sleep(50) // allow for the actor to pick up the initial, empty database
         val soon = now plusMillis 50
         val entry = mkIndexEntry(soon, "foo")
         when(cassandraOps.readIndexEntriesSince(soon minus extTimeWindow)).thenReturn(Source.single(entry))
         now = soon
-        eventually {
-          emitted should contain(entry)
-        }
+        emitted.expectMsg(entry)
       }
     }
 
@@ -87,15 +87,12 @@ class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFuture
       "emit the newly found entries" in new Fixture (
         initialContent = Set(mkIndexEntry(noon minusMillis 10, "foo"))
       ){
-        Thread.sleep(50) // allow for the actor to pick up the initial, empty database
         val soon = now plusMillis 50
         val entry = mkIndexEntry(soon, "bar")
         when(cassandraOps.readIndexEntriesSince(soon minus extTimeWindow)).thenReturn(Source(initialContent.toList :+ entry))
+
         now = soon
-        eventually {
-          emitted should have size (1)
-          emitted should contain(entry)
-        }
+        emitted.expectMsg(entry)
       }
     }
 
@@ -103,22 +100,18 @@ class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFuture
       "emit those entries until it considers the time windows closed" in new Fixture(
         initialTime = secondBeforeMidnight
       ) {
-        Thread.sleep(50) // allow for the actor to pick up the initial, empty database
         val soon = now plusMillis 10 // still before midnight
         val todaysEntry = mkIndexEntry(soon, "today")
         when(cassandraOps.readIndexEntriesSince(soon minus extTimeWindow)).thenReturn(Source.single(todaysEntry))
         now = soon
-        eventually {
-          emitted should have size(1)
-        }
+        emitted.expectMsg(todaysEntry)
 
         val tomorrow = now plusSeconds 10 // now crossed the date boundary
+        val tomorrowsEntry = mkIndexEntry(tomorrow, "tomorrow")
         when(cassandraOps.readIndexEntriesSince(tomorrow minus extTimeWindow)).thenReturn(Source.single(todaysEntry))
-        when(cassandraOps.readIndexEntriesSince(startOfTomorrow)).thenReturn(Source.single(mkIndexEntry(tomorrow, "tomorrow")))
+        when(cassandraOps.readIndexEntriesSince(startOfTomorrow)).thenReturn(Source.single(tomorrowsEntry))
         now = tomorrow
-        eventually {
-          emitted should have size(2)
-        }
+        emitted.expectMsg(tomorrowsEntry)
       }
     }
   }
