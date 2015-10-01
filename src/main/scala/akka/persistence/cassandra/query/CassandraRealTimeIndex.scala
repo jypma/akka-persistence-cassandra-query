@@ -1,29 +1,21 @@
 package akka.persistence.cassandra.query
 
-import akka.actor.Actor
-import akka.persistence.cassandra.Cassandra
-import java.time.Instant
-import java.time.Duration
-import akka.persistence.cassandra.query.CassandraReadJournal.IndexEntry
-import akka.persistence.cassandra.journal.CassandraJournalConfig
-import java.util.Calendar
-import akka.stream.scaladsl.Sink
-import akka.stream.Materializer
-import scala.concurrent.duration._
-import akka.stream.actor.ActorPublisher
-import akka.stream.actor.ActorPublisherMessage.Cancel
-import akka.stream.actor.ActorPublisherMessage.Request
+import java.time.{ Duration, Instant }
+import java.util.{ Calendar, TimeZone }
+
 import scala.collection.immutable.TreeSet
+import scala.concurrent.duration.{ DurationInt, FiniteDuration }
+
+import akka.persistence.cassandra.query.CassandraOps.IndexEntry
+import akka.stream.Materializer
+import akka.stream.actor.ActorPublisher
+import akka.stream.actor.ActorPublisherMessage.{ Cancel, Request }
+import akka.stream.scaladsl.{ Keep, Sink, Source }
+
 import CassandraRealTimeIndex._
-import java.util.TimeZone
-import java.time.ZoneId
-import akka.stream.scaladsl.Source
-import akka.stream.scaladsl.Keep
 
 class CassandraRealTimeIndex(
-    cassandra: Cassandra,
-
-    timeIndexTableName: String,
+    cassandraOps: CassandraOps,
 
     // longest time window ever stored + allowed clock drift
     extendedTimeWindowLength:Duration = Duration.ofSeconds(120),
@@ -37,9 +29,6 @@ class CassandraRealTimeIndex(
   )(implicit m:Materializer) extends ActorPublisher[IndexEntry] {
   import context.dispatcher
 
-  val selectEventsSince = cassandra.prepareSelect[IndexEntry](
-      s"SELECT * FROM ${timeIndexTableName} WHERE year_month_day = ? AND window_start >= ?")
-
   val queue = collection.mutable.Queue.empty[IndexEntry]
 
   case object CassandraDone
@@ -51,11 +40,12 @@ class CassandraRealTimeIndex(
   context.become(polling(start = allTimeWindowsClosed, previousEvents = None))
 
   def polling(start: Instant, previousEvents: Option[Set[IndexEntry]]): Receive = {
+    println("Reading from " + start)
     var entries = TreeSet.empty[IndexEntry](Ordering.by { i => (i.window_start, i.persistenceId) })
     concatOpt(
-      selectEventsSince.execute(toYearMonthDay(start), start),
+      cassandraOps.readIndexEntriesSince(start),
       nextDayWithinExtendedTimeWindow(start).map { nextDay =>
-        selectEventsSince.execute(toYearMonthDay(nextDay), nextDay)
+        cassandraOps.readIndexEntriesSince(nextDay)
       }
     ).runWith(Sink.actorRef(self, CassandraDone))
 

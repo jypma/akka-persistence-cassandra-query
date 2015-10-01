@@ -21,20 +21,32 @@ import akka.persistence.cassandra.streams.SortedFilterDuplicate
 import akka.persistence.cassandra.streams.FanoutAndMerge
 import akka.stream.Materializer
 import akka.persistence.query.EventEnvelope
+import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 
-class CassandraReadJournal(nowFunc: => Instant = clockNowFunc)(implicit system: ActorSystem, m: Materializer) extends ReadJournal {
+/**
+ * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
+ * that is extended by writing to a time index table.
+ *
+ * @param realtimeIndex A publisher that publishes `IndexEntry` values whenever new index entries
+ * appear in cassandra, in real-time (i.e. eventually, but in order, without duplicates and without skipped entries).
+ */
+class CassandraReadJournal(
+    realtimeIndex: Publisher[IndexEntry],
+    nowFunc: => Instant = clockNowFunc
+)(implicit system: ActorSystem, m: Materializer) extends ReadJournal {
   def query[T, M](q: Query[T, M], hints: Hint*): Source[T, M] = {
     q match {
     	// TODO actually use the tag to query for events of a different type. Requires an extra column in cassandra.
       case EventsByTag("_all", offset) =>
         val (sink, source) = FanoutAndMerge(byPersistenceId, getEvents)
 
+        // Combine past index entries and new, real-time ones into a single logical Source
         RealTime.source(pastIndex, realtimeIndex)
 
-        // filter out duplicate persistenceIds within the same time window
+        // Filter out duplicate persistenceIds within the same time window
         .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
 
-        // drop it into the realtime [sink], so merged StoredEvents come out the other [source] end.
+        // Drop it into the fanout [sink] to fetch nested StoredEvent entries, so they come out merged at the other [source] end.
         .runWith(sink)
 
         source
@@ -47,11 +59,6 @@ class CassandraReadJournal(nowFunc: => Instant = clockNowFunc)(implicit system: 
    * Queries cassandra for the given time window interval, once.
    */
   private def pastIndex(from: Instant, to: Instant): Source[IndexEntry,Unit] = ???
-
-  /**
-   * Periodically polls for new index entries
-   */
-  private val realtimeIndex: Publisher[IndexEntry] = ???
 
   /**
    * Queries the cassandra index, and then gets the actual events, for the given time window interval, once.
@@ -90,28 +97,6 @@ class CassandraReadJournal(nowFunc: => Instant = clockNowFunc)(implicit system: 
 
 
 object CassandraReadJournal {
-  case class StoredEvent(sequenceNr: Long, windowStart: Instant, msg: MessageFormats.PersistentMessage) {
-    override def toString = s"StoredEvent(${sequenceNr}, ${windowStart}, ...)"
-  }
-
-  case class IndexEntry(yearMonthDay: Int, window_start: Instant,
-      persistenceId: String, firstSequenceNrInWindow: Long, partitionNr: Long)
-
-  implicit val indexEntryRowMapper: RowMapper[IndexEntry] = row => IndexEntry(
-      row.getInt("year_month_day"),
-      Instant.ofEpochMilli(row.getDate("window_start").getTime),
-      row.getString("persistence_id"),
-      row.getLong("first_sequence_nr_in_window"),
-      row.getLong("partition_nr"))
-
-
-  implicit val storedEventRowMapper: RowMapper[StoredEvent] = { row =>
-    val event = persistentFromByteBuffer(row.getBytes("message"))
-    StoredEvent(row.getLong("sequence_nr"), Instant.ofEpochMilli(row.getDate("window_start").getTime), event)
-  }
-
-  private def persistentFromByteBuffer(b: ByteBuffer): MessageFormats.PersistentMessage =
-    MessageFormats.PersistentMessage.parseFrom(akka.protobuf.ByteString.copyFrom(b))
 
   def clockNowFunc = Instant.now()
 }
