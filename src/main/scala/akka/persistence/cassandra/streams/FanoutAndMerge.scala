@@ -28,24 +28,8 @@ object FanoutAndMerge {
     val mergeOut = Source.actorPublisher(Props[MergeOutActor[Out]]).mapMaterializedValue {
       actor => mergeOutProxy ! actor
     }
-    val mergeIn = Sink.actorSubscriber(Props(classOf[MergeInActor], mergeOutProxy))
 
-    (Flow[In].transform(() => new PushStage[In,Nothing] {
-      val inProgress = collection.mutable.Map.empty[Key, ActorRef]
-
-      override def onPush(in: In, ctx:Context[Nothing]) = {
-        val result = inProgress.getOrElseUpdate(getKey(in), {
-          try {
-          getSource(in).runWith(mergeIn)
-          } catch {
-            case x:Throwable =>
-              x.printStackTrace()
-              throw x
-          }
-        })
-        ctx.pull()
-      }
-    }).to(Sink.foreach[Nothing](println)), mergeOut)
+    (Sink.actorSubscriber(Props(new FanoutActor(getKey,getSource,mergeOutProxy))).mapMaterializedValue { x => }, mergeOut)
   }
 
   /**
@@ -103,7 +87,9 @@ object FanoutAndMerge {
       }
 
       for ((actor, count) <- landed) {
-        actor ! Landed(count)
+        if (knownSenders.contains(actor)) {
+        	actor ! Landed(count)
+        }
       }
 
       if (landed.size > 0) {
@@ -118,12 +104,13 @@ object FanoutAndMerge {
     }
   }
 
-  class MergeInActor(outActor: ActorRef) extends ActorSubscriber with ActorLogging {
+  case object RequestDeath
+
+  class MergeInActor(owner: ActorRef, outActor: ActorRef) extends ActorSubscriber with ActorLogging {
     var inFlight:Int = 0
 
-    //TODO consider ZeroRequestStrategy instead, having the MergeOutActor broadcasting requests evenly?
-    //although that might not work with many many input actors.
-    override def requestStrategy = new MaxInFlightRequestStrategy(50) {
+    //TODO externalize this number. For now, it's the same as akka's internal stage's maximum buffer size.
+    override def requestStrategy = new MaxInFlightRequestStrategy(16) {
       override def inFlightInternally = inFlight
     }
 
@@ -141,9 +128,42 @@ object FanoutAndMerge {
         }
 
       case OnComplete =>
-        context.stop(self)
+        owner ! RequestDeath
     }
   }
 
+  class FanoutActor[In,Key,Out](
+      getKey: In => Key,
+      getSource: In => Source[Out,Any],
+      out: ActorRef)
+      (implicit m:Materializer) extends ActorSubscriber {
 
+	  val mergeIn = Sink.actorSubscriber(Props(classOf[MergeInActor], out))
+
+    val inProgress = collection.mutable.Set.empty[Key]
+	  val keyForActor = collection.mutable.Map.empty[ActorRef,Key]
+
+    // TODO We keep this maximum number of open sub-streams, before blocking upstream. Make this configurable.
+    override def requestStrategy = new MaxInFlightRequestStrategy(1000) {
+      override def inFlightInternally = inProgress.size
+    }
+
+    def receive = {
+      case OnNext(elem) =>
+        val in = elem.asInstanceOf[In]
+        val key = getKey(in)
+        if (inProgress.add(key)) {
+          val actor = getSource(in).runWith(mergeIn)
+          context.watch(actor)
+          keyForActor(actor) = key
+        }
+
+      case RequestDeath =>
+        keyForActor.get(sender).foreach(inProgress.remove)
+        context.stop(sender)
+
+      case OnComplete =>
+        context.stop(self)
+    }
+  }
 }
