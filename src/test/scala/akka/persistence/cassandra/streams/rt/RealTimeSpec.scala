@@ -45,8 +45,8 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
       implicit val chronology = new Chronology[Event,Long] {
         override def getTime(elem: Event) = elem.time
         override def beginningOfTime = Long.MinValue
-        override def now = self.now
-        override def isBefore(a: Long, b: Long) = a < b;
+        override def endOfTime = self.now
+        override def isBefore(a: Long, b: Long) = a < b
       }
 
       val (realtimeActor, realtimePublisher) = Source.actorRef[Event](10, OverflowStrategy.fail).toMat(Sink.publisher)(Keep.both).run()

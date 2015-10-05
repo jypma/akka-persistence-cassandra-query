@@ -29,7 +29,7 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
     	when(cassandraOps.findHighestSequenceNr("doc1")).thenAnswer(new Answer[Int] {
         override def answer(invocation: InvocationOnMock) = events.size
       })
-      when(cassandraOps.readEvents(is("doc1"), anyLong, is(Long.MaxValue))).thenAnswer(new Answer[Source[EventEnvelope,Any]] {
+      when(cassandraOps.readEvents(is("doc1"))(anyLong, is(Long.MaxValue))).thenAnswer(new Answer[Source[EventEnvelope,Any]] {
         override def answer(invocation: InvocationOnMock) = {
           val from = invocation.getArgumentAt(1, classOf[Long]).toInt
           Source(events.drop(from - 1).toList)
@@ -43,7 +43,7 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
 
 	    // Allow the publisher to pick up the initialEvents (which it'll do shortly after having queried for initialTime)
       eventually {
-        verify(cassandraOps, atLeastOnce).readEvents("doc1", initialEvents.size + 1, Long.MaxValue)
+        verify(cassandraOps, atLeastOnce).readEvents("doc1")(initialEvents.size + 1, Long.MaxValue)
       }
     }
 

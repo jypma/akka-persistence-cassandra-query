@@ -41,7 +41,7 @@ class CassandraRealTimeEvents(
   val idle: Receive = { case _ => }
 
   def poll(lastSeenSeqNr: Long, lastSeenOffset: Option[Long]): Receive = {
-    cassandraOps.readEvents(persistenceId, lastSeenSeqNr + 1, Long.MaxValue).runWith(Sink.actorRef(self, CassandraDone))
+    cassandraOps.readEvents(persistenceId)(lastSeenSeqNr + 1, Long.MaxValue).runWith(Sink.actorRef(self, CassandraDone))
     var highestSeenSeqNr = lastSeenSeqNr
     var highestSeenOffset = lastSeenOffset
 

@@ -1,12 +1,10 @@
 package akka.persistence.cassandra
 
 import akka.stream.scaladsl.Source
-import java.util.Date
 import akka.persistence.cassandra.journal.CassandraJournalConfig
-import akka.actor.ActorSystem
+import akka.actor.{ActorRef, ActorSystem}
 import com.datastax.driver.core.Row
 import scala.collection.JavaConverters.iterableAsScalaIterableConverter
-import scala.collection.JavaConverters._
 import scala.concurrent.blocking
 
 trait Cassandra {
@@ -23,7 +21,7 @@ object Cassandra {
   trait PreparedStatement {}
 
   trait PreparedSelectStatement[T] extends PreparedStatement {
-    def execute(args: Any*): Source[T, Any]
+    def execute(args: Any*): Source[T, ActorRef]
 
     def executeBlocking(args: Any*): Iterator[T]
   }
@@ -50,7 +48,7 @@ object Cassandra {
         stmt
       }
 
-      override def execute(args: Any*): Source[T, Any] = {
+      override def execute(args: Any*): Source[T, ActorRef] = {
     	  ResultSetActorPublisher.source(session.executeAsync(mkStatement(args)), implicitly[RowMapper[T]])
       }
 

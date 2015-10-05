@@ -8,7 +8,6 @@ import akka.stream.scaladsl.FlattenStrategy
 import akka.stream.stage.StatefulStage
 import akka.stream.scaladsl.Keep
 import akka.stream.scaladsl.FlowGraph
-import akka.stream.scaladsl.Merge
 import akka.stream.scaladsl.MergePreferred
 import akka.stream.stage.Context
 import akka.actor.ActorSystem
@@ -30,7 +29,7 @@ trait RealTime[Elem,Time] {
   def source(getPast: (Time, Time) => Source[Elem,Any], realtime: Publisher[Elem]): Source[Elem, ActorRef] = {
 
     val past = Source.actorRef[Time](2, OverflowStrategy.dropHead).map { startTime =>
-      val endTime = chronology.now
+      val endTime = chronology.endOfTime
       getPast(startTime, endTime) concat Source.single(SourceCompleted)
     }.flatten(FlattenStrategy.concat)
 
