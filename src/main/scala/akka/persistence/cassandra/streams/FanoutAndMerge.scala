@@ -53,16 +53,33 @@ object FanoutAndMerge {
     }
   }
 
+  /**
+   * Sent from FanoutActor to MergeOutActor, so the latter can conclude the stream
+   * has completed when FanoutActor has stopped.
+   */
+  case class Register(owner: ActorRef)
+
   class MergeOutActor[T] extends ActorPublisher[T] {
     val buffer = collection.mutable.Queue.empty[(T,ActorRef)]
     val knownSenders = collection.mutable.Set.empty[ActorRef]
+    var owner: ActorRef = null
+    var completed: Boolean = false
 
     def receive = {
+      case Register(someOwner) =>
+        owner = someOwner
+        context.watch(owner)
+
       case requestedMore:Request =>
         sendBuffer()
 
       case Cancel =>
         onCompleteThenStop()
+
+      case Terminated(actor) if actor == owner =>
+        println("owner has died, assuming completed")
+        completed = true
+        stopIfDone()
 
       case Terminated(actor) =>
         knownSenders -= actor
@@ -98,12 +115,16 @@ object FanoutAndMerge {
     }
 
     private def stopIfDone() {
-      if (buffer.isEmpty && knownSenders.isEmpty) {
+      if (buffer.isEmpty && knownSenders.isEmpty && completed) {
         onCompleteThenStop()
       }
     }
   }
 
+  /**
+   * Sent from instances of MergeInActor to the owning FanoutActor to indicate that the nested stream has
+   * ended. This allows FanoutActor to still only keep 1 concurrent nested stream open per key.
+   */
   case object RequestDeath
 
   class MergeInActor(owner: ActorRef, outActor: ActorRef) extends ActorSubscriber with ActorLogging {
@@ -138,10 +159,14 @@ object FanoutAndMerge {
       out: ActorRef)
       (implicit m:Materializer) extends ActorSubscriber {
 
-	  val mergeIn = Sink.actorSubscriber(Props(classOf[MergeInActor], out))
+	  val mergeIn = Sink.actorSubscriber(Props(classOf[MergeInActor], self, out))
 
     val inProgress = collection.mutable.Set.empty[Key]
 	  val keyForActor = collection.mutable.Map.empty[ActorRef,Key]
+
+	  var completed: Boolean = false
+
+	  out ! Register(self)
 
     // TODO We keep this maximum number of open sub-streams, before blocking upstream. Make this configurable.
     override def requestStrategy = new MaxInFlightRequestStrategy(1000) {
@@ -160,10 +185,22 @@ object FanoutAndMerge {
 
       case RequestDeath =>
         keyForActor.get(sender).foreach(inProgress.remove)
+        keyForActor.remove(sender)
         context.stop(sender)
+        stopIfDone()
+
+      case Terminated(actor) =>
+        stopIfDone()
 
       case OnComplete =>
+        completed = true
+        stopIfDone()
+    }
+
+    def stopIfDone() {
+      if (keyForActor.isEmpty && completed) {
         context.stop(self)
+      }
     }
   }
 }
