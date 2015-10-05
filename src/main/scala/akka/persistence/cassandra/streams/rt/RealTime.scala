@@ -24,6 +24,8 @@ trait RealTime[Elem,Time] {
    * which are expected to catch up with a realtime-broadcasting Publisher [rt] that will inform of elements
    * coming in in real-time. Eventually, the returned source will only return the broadcasted events
    * from [rt].
+   *
+   * The stream completes after having transitioned to real-time, and the [realtime] completes.
    */
   def source(getPast: (Time, Time) => Source[Elem,Any], realtime: Publisher[Elem]): Source[Elem, ActorRef] = {
 
@@ -32,7 +34,7 @@ trait RealTime[Elem,Time] {
       getPast(startTime, endTime) concat Source.single(SourceCompleted)
     }.flatten(FlattenStrategy.concat)
 
-    val current = Source(realtime).map(RealTimeElem)
+    val current = Source(realtime).map(RealTimeElem).transform { () => OnComplete(RealtimeCompleted) }
 
     val merged = Source(past, current)(Keep.left) { implicit b =>
       (in1, in2) =>
@@ -50,6 +52,7 @@ trait RealTime[Elem,Time] {
   }
 
   private[rt] case object SourceCompleted
+  private[rt] case object RealtimeCompleted
   private[rt] case class RealTimeElem(elem:Elem)
 
   private[rt] class ControlStage(implicit chronology:Chronology[Elem,Time]) extends StatefulStage[Any,Elem] {
@@ -77,8 +80,13 @@ trait RealTime[Elem,Time] {
     def catchingUp(timeActor: ActorRef, from: Time): State = new State {
       var lastRealtime: Option[Time] = None
       var lastPast: Option[Time] = None
+      var realtimeCompleted:Boolean = false
 
       def onPush(msg: Any, ctx: Context[Elem]) = msg match {
+        case RealtimeCompleted =>
+          realtimeCompleted = true
+          ctx.pull()
+
         case RealTimeElem(elem) =>
           println("Got realtime elem " + elem)
           lastRealtime = Some(chronology.getTime(elem))
@@ -86,7 +94,10 @@ trait RealTime[Elem,Time] {
 
         case SourceCompleted =>
           println("completed a source")
-          if (lastPast.isDefined) {
+          if (realtimeCompleted) {
+            // our current run from past is complete, but the real-time source has gone away. Let's just end.
+            ctx.finish()
+          } else if (lastPast.isDefined) {
             if (lastRealtime.isDefined) {
               if (lastPast.equals(lastRealtime)) {
                 // we're in sync, precisely.
@@ -108,12 +119,13 @@ trait RealTime[Elem,Time] {
              // - take a param "maxElemsWithSameTime", which is the max buffer
             	readMoreFromPast()
             }
+            ctx.pull()
           } else {
             // retry from the same startTime, we need a run where we get both elements from our source AND a realtime element.
             // but put in a delay before re-running the query, where we CAN receive the realtime elems.
             readMoreFromPast()
+            ctx.pull()
           }
-          ctx.pull()
 
         case mustBeElem => // everything else is forwarded from the incoming "past" stream
           val elem = mustBeElem.asInstanceOf[Elem]
@@ -141,6 +153,8 @@ trait RealTime[Elem,Time] {
       def onPush(msg: Any, ctx: Context[Elem]) = msg match {
         case RealTimeElem(elem) =>
           ctx.push(elem)
+        case RealtimeCompleted =>
+          ctx.finish()
         case SourceCompleted =>
           // ignore
           ctx.pull()

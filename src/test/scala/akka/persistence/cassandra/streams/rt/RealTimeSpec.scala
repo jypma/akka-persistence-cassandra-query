@@ -82,5 +82,12 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
         receiver.expectMsg(Event(4, "only sent to real-time, should be forwarded directly"))
       }
     }
+
+    "noticing that the given real-time stream completes" should {
+      "complete itself" in new Fixture {
+        system.stop(realtimeActor)
+        receiver.expectMsg("complete")
+      }
+    }
   }
 }

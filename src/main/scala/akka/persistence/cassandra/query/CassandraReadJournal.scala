@@ -68,7 +68,8 @@ class CassandraReadJournal(
   /**
    * Returns the publisher that emits real-time events for the given persistenceId.
    *
-   * TODO Shut down publishers when the time window for their last seen real-time event has been closed.
+   * TODO Shut down publishers when the time window for their last seen real-time event has been closed,
+   * by removing them from the global map when they're closed.
    */
   private def realtimeEvents(persistenceId:String): Publisher[EventEnvelope] = ???
 
