@@ -31,6 +31,7 @@ import akka.persistence.cassandra.query.CassandraOps.IndexEntry
  * appear in cassandra, in real-time (i.e. eventually, but in order, without duplicates and without skipped entries).
  */
 class CassandraReadJournal(
+    cassandraOps: CassandraOps,
     realtimeIndex: Publisher[IndexEntry],
     nowFunc: => Instant = clockNowFunc
 )(implicit system: ActorSystem, m: Materializer) extends ReadJournal {
@@ -41,13 +42,13 @@ class CassandraReadJournal(
         val (sink, source) = FanoutAndMerge(byPersistenceId, getEvents)
 
         // Combine past index entries and new, real-time ones into a single logical Source
-        RealTime.source(pastIndex, realtimeIndex)
+        RealTime.source(cassandraOps.pastIndex, realtimeIndex)
 
-        // Filter out duplicate persistenceIds within the same time window
-        .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
+          // Filter out duplicate persistenceIds within the same time window
+          .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
 
-        // Drop it into the fanout [sink] to fetch nested StoredEvent entries, so they come out merged at the other [source] end.
-        .runWith(sink)
+          // Drop it into the fanout [sink] to fetch nested StoredEvent entries, so they come out merged at the other [source] end.
+          .runWith(sink)
 
         source
     }
@@ -56,14 +57,9 @@ class CassandraReadJournal(
   private def byPersistenceId(i:IndexEntry) = i.persistenceId
 
   /**
-   * Queries cassandra for the given time window interval, once.
-   */
-  private def pastIndex(from: Instant, to: Instant): Source[IndexEntry,Unit] = ???
-
-  /**
    * Queries the cassandra index, and then gets the actual events, for the given time window interval, once.
    */
-  private def pastEvents(persistenceId:String)(fromTimeWindow: Long, toTimeWindow: Long): Source[EventEnvelope,Unit] = ???
+  private def pastEvents(persistenceId:String)(fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Unit] = ???
 
   /**
    * Returns the publisher that emits real-time events for the given persistenceId.
@@ -78,20 +74,20 @@ class CassandraReadJournal(
    * turns to real-time.
    */
   private def getEvents(entry: IndexEntry): Source[EventEnvelope,Any] = {
-    RealTime.source(pastEvents(entry.persistenceId), realtimeEvents(entry.persistenceId))
+    RealTime.source(cassandraOps.readEvents(entry.persistenceId), realtimeEvents(entry.persistenceId))
   }
 
   private implicit val indexChronology = new Chronology[IndexEntry,Instant] {
     def getTime(elem: IndexEntry) = elem.window_start
     def beginningOfTime = Instant.MIN
-    def now = nowFunc
+    def endOfTime = nowFunc
     def isBefore(a: Instant, b: Instant) = a.isBefore(b)
   }
 
   private implicit val eventChronology = new Chronology[EventEnvelope,Long] {
-    def getTime(elem:EventEnvelope) = elem.offset
+    def getTime(elem:EventEnvelope) = elem.sequenceNr
     def beginningOfTime = 0l
-    def now = nowFunc.toEpochMilli()
+    def endOfTime = Long.MaxValue
     def isBefore(a: Long, b: Long) = a < b
   }
 }

@@ -4,6 +4,8 @@ import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.{ Calendar, TimeZone }
 
+import akka.actor.ActorRef
+
 import scala.collection.AbstractIterator
 
 import akka.persistence.cassandra.Cassandra
@@ -20,10 +22,33 @@ class CassandraOps(
   timeIndexTableName: String,
   targetPartitionSize: Int
 ) {
+
+  /**
+   * Queries cassandra for the given time window interval, once.
+   */
+  def pastIndex(from: Instant, to: Instant): Source[IndexEntry,Unit] = {
+    val startDay = toYearMonthDay(from)
+    val endDay = toYearMonthDay(to)
+
+    Source(startDay.to(endDay))
+      .map(day => entriesForDay(day, from, to))
+      .flatten(FlattenStrategy.concat)
+  }
+
+  private val selectEventsForDay = cassandra.prepareSelect[IndexEntry](
+    s"SELECT * FROM ${timeIndexTableName} WHERE year_month_day = ? AND window_start >= ? and window_start <= ?")
+
+  private def entriesForDay(day: Int, from: Instant, to: Instant): Source[IndexEntry,ActorRef] = {
+    selectEventsForDay.execute(day, from, to)
+  }
+
   def readIndexEntriesSince(start: Instant): Source[IndexEntry,Any] =
     selectEventsSince.execute(toYearMonthDay(start), start)
 
-  def readEvents(persistenceId: String, fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Any] = {
+  /**
+   * Queries the cassandra index, and then gets the actual events, for the given time window interval, once.
+   */
+  def readEvents(persistenceId: String)(fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Any] = {
     val startNr = math.max(highestDeletedSequenceNumber(persistenceId) + 1, fromSequenceNr)
     Source(() => from(partitionNr(startNr))).map { partitionNr =>
       selectMessages.execute(persistenceId, partitionNr, startNr)
