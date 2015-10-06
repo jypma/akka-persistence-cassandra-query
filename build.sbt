@@ -11,7 +11,7 @@ scalacOptions ++= "-deprecation" :: "-feature" :: "-target:jvm-1.8" :: Nil
 libraryDependencies += "org.scala-lang" % "scala-library" % scalaVersion.value
 
 libraryDependencies ++= {
-  val akkaVersion = "2.4.0-RC2"
+  val akkaVersion = "2.4.0"
   val akkaStreamVersion = "1.0"
 
   Seq(
@@ -25,7 +25,7 @@ libraryDependencies ++= {
 
 libraryDependencies += "org.iq80.leveldb" % "leveldb" % "0.7" % "test" // only to make eclipse happy, we're not using it.
 
-libraryDependencies += "com.github.krasserm" %% "akka-persistence-cassandra" % "0.4-SNAPSHOT"
+libraryDependencies += "com.github.krasserm" %% "akka-persistence-cassandra" % "0.5-SNAPSHOT"
 
 libraryDependencies += "org.scalatest" %% "scalatest" % "2.2.4" % "test"
 

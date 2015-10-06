@@ -75,11 +75,20 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
 
         receiver.expectMsg(Event(1, "hello"))
         receiver.expectMsg(Event(2, "world"))
+        // we emit several realtime+past events, so that the RealTime source is very unlikely to miss them all.
+        // however, there's still a race condition that would allow this test to fail.
         receiver.expectMsg(emit("real-time and past event for timestamp 3"))
-
+        Thread.sleep(20)
         now = 4
-        realtimeActor ! Event(4, "only sent to real-time, should be forwarded directly")
-        receiver.expectMsg(Event(4, "only sent to real-time, should be forwarded directly"))
+        receiver.expectMsg(emit("real-time and past event for timestamp 4"))
+        Thread.sleep(20)
+        now = 5
+        receiver.expectMsg(emit("real-time and past event for timestamp 5"))
+
+        Thread.sleep(20)
+        val rtEvent = Event(6, "only sent to real-time, should be forwarded directly")
+        realtimeActor ! rtEvent
+        receiver.expectMsg(rtEvent)
       }
     }
 

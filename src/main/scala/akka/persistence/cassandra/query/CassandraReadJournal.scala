@@ -3,10 +3,7 @@ package akka.persistence.cassandra.query
 import akka.actor.ExtendedActorSystem
 import com.typesafe.config.Config
 import akka.persistence.query.scaladsl.ReadJournal
-import akka.persistence.query.Hint
 import akka.stream.scaladsl.Source
-import akka.persistence.query.Query
-import akka.persistence.query.EventsByTag
 import CassandraReadJournal._
 import java.time.Instant
 import akka.persistence.serialization.MessageFormats
@@ -22,6 +19,7 @@ import akka.persistence.cassandra.streams.FanoutAndMerge
 import akka.stream.Materializer
 import akka.persistence.query.EventEnvelope
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
+import akka.persistence.query.scaladsl.EventsByTagQuery
 
 /**
  * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
@@ -34,24 +32,22 @@ class CassandraReadJournal(
     cassandraOps: CassandraOps,
     realtimeIndex: Publisher[IndexEntry],
     nowFunc: => Instant = clockNowFunc
-)(implicit system: ActorSystem, m: Materializer) extends ReadJournal {
-  def query[T, M](q: Query[T, M], hints: Hint*): Source[T, M] = {
-    q match {
-    	// TODO actually use the tag to query for events of a different type. Requires an extra column in cassandra.
-      case EventsByTag("_all", offset) =>
-        val (sink, source) = FanoutAndMerge(byPersistenceId, getEvents)
+)(implicit system: ActorSystem, m: Materializer) extends EventsByTagQuery {
 
-        // Combine past index entries and new, real-time ones into a single logical Source
-        RealTime.source(cassandraOps.pastIndex, realtimeIndex)
+  override def eventsByTag(tag: String, offset: Long): Source[EventEnvelope, Unit] = {
+   	// TODO actually use the tag to query for events of a different type. Requires an extra column in cassandra.
+    val (sink, source) = FanoutAndMerge(byPersistenceId, getEvents)
 
-          // Filter out duplicate persistenceIds within the same time window
-          .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
+    // Combine past index entries and new, real-time ones into a single logical Source
+    RealTime.source(cassandraOps.pastIndex, realtimeIndex)
 
-          // Drop it into the fanout [sink] to fetch nested StoredEvent entries, so they come out merged at the other [source] end.
-          .runWith(sink)
+      // Filter out duplicate persistenceIds within the same time window
+      .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
 
-        source
-    }
+      // Drop it into the fanout [sink] to fetch nested StoredEvent entries, so they come out merged at the other [source] end.
+      .runWith(sink)
+
+    source
   }
 
   private def byPersistenceId(i:IndexEntry) = i.persistenceId

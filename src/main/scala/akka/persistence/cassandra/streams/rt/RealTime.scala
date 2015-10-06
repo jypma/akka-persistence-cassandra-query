@@ -62,12 +62,10 @@ trait RealTime[Elem,Time] {
     def initial = new State {
       def onPush(msg: Any, ctx: Context[Elem]) = msg match {
         case ref:ActorRef =>
-          println("Received actor")
           ref ! chronology.beginningOfTime
           become(catchingUp(ref, chronology.beginningOfTime))
           ctx.pull()
         case other =>
-          println("Unexpected message: " + other)
           ctx.fail(new RuntimeException("Unexpected message: " + other))
       }
     }
@@ -87,12 +85,10 @@ trait RealTime[Elem,Time] {
           ctx.pull()
 
         case RealTimeElem(elem) =>
-          println("Got realtime elem " + elem)
           lastRealtime = Some(chronology.getTime(elem))
           ctx.pull()
 
         case SourceCompleted =>
-          println("completed a source")
           if (realtimeCompleted) {
             // our current run from past is complete, but the real-time source has gone away. Let's just end.
             ctx.finish()
@@ -136,7 +132,6 @@ trait RealTime[Elem,Time] {
         val nextFrom = lastPast.getOrElse(from)
     		lastRealtime = None
     		lastPast = None
-    		println("Reading some more from " + nextFrom + " after having read from " + from)
         if (nextFrom == from) {
           // We're about to poll for the same query.
           system.scheduler.scheduleOnce(pollInterval, timeActor, nextFrom)(system.dispatcher, system.deadLetters)

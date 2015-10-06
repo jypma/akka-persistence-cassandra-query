@@ -77,7 +77,6 @@ object FanoutAndMerge {
         onCompleteThenStop()
 
       case Terminated(actor) if actor == owner =>
-        println("owner has died, assuming completed")
         completed = true
         stopIfDone()
 
