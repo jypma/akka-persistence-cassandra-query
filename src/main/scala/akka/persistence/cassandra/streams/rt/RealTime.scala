@@ -164,7 +164,7 @@ trait RealTime[Elem,Time] {
 
 object RealTime {
   def source[Elem,Time](getPast: (Time, Time) => Source[Elem,Any], realtime: Publisher[Elem])
-                       (implicit sys:ActorSystem, ch:Chronology[Elem,Time]) = {
+                       (implicit sys:ActorSystem, ch:Chronology[Elem,Time]): Source[Elem, ActorRef] = {
     new RealTime[Elem,Time] {
       override def chronology = ch
       override def system = sys

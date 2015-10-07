@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/jypma/akka-persistence-cassandra-query.svg?branch=master)](https://travis-ci.org/jypma/akka-persistence-cassandra-query)
+
 About
 =====
 

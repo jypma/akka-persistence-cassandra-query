@@ -40,11 +40,11 @@ class FanoutAndMergeSpec extends WordSpec with Matchers with ScalaFutures with S
       count should be (200)
     }
 
-    "re-process input elements with the same key, after their nested source has completed" in {
+    "re-process input elements with the same key, after their nested source has completed, and then end once the source completes" in {
       val trigger = Source.actorRef(1, OverflowStrategy.fail)
       val (sink, source) = FanoutAndMerge(getKey, getSource)
       val received = TestProbe()
-      source.runWith(Sink.actorRef(received.ref, "not_testing_stop"))
+      source.runWith(Sink.actorRef(received.ref, "completed"))
       val triggerActor = trigger.toMat(sink)(Keep.left).run()
 
       triggerActor ! InElem(1)
@@ -55,6 +55,10 @@ class FanoutAndMergeSpec extends WordSpec with Matchers with ScalaFutures with S
 
       triggerActor ! InElem(1)
       for (i <- 1 to 200) received.expectMsgType[Int]
+
+      // let's end the stream.
+      system.stop(triggerActor)
+      received.expectMsg("completed")
     }
   }
 }

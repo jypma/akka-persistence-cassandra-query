@@ -1,23 +1,26 @@
 package akka.persistence.cassandra.query
 
-import org.scalatest.concurrent.Eventually
-import org.scalatest.concurrent.ScalaFutures
-import org.scalatest.WordSpec
-import akka.persistence.cassandra.test.SharedActorSystem
-import org.scalatest.Matchers
-import org.mockito.Mockito.{ mock, verify, when, atLeastOnce }
-import org.mockito.Matchers.{ anyLong, eq => is }
-import org.mockito.stubbing.Answer
-import scala.concurrent.duration._
-import akka.actor.Props
-import akka.stream.scaladsl.Source
-import akka.stream.scaladsl.Sink
-import akka.testkit.TestProbe
-import akka.persistence.query.EventEnvelope
-import org.mockito.invocation.InvocationOnMock
 import java.time.Instant
 
+import scala.concurrent.duration.DurationInt
+
+import org.mockito.Matchers.{ anyLong, eq => is }
+import org.mockito.Mockito.{ atLeastOnce, mock, verify, when }
+import org.mockito.invocation.InvocationOnMock
+import org.mockito.stubbing.Answer
+import org.scalatest.{ Finders, Matchers, WordSpec }
+import org.scalatest.concurrent.{ Eventually, ScalaFutures }
+import org.scalatest.time.{ Seconds, Span }
+
+import akka.actor.Props
+import akka.persistence.cassandra.test.SharedActorSystem
+import akka.persistence.query.EventEnvelope
+import akka.stream.scaladsl.{ Keep, Sink, Source }
+import akka.testkit.TestProbe
+
 class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
+  implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
+
   "CassandraRealTimeEvents" when {
     val startTime: Instant = Instant.ofEpochSecond(1444053395)
 
@@ -26,7 +29,7 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
 
       var now: Instant = startTime
       val cassandraOps = mock(classOf[CassandraOps])
-    	when(cassandraOps.findHighestSequenceNr("doc1")).thenAnswer(new Answer[Int] {
+      when(cassandraOps.findHighestSequenceNr("doc1")).thenAnswer(new Answer[Int] {
         override def answer(invocation: InvocationOnMock) = events.size
       })
       when(cassandraOps.readEvents(is("doc1"))(anyLong, is(Long.MaxValue))).thenAnswer(new Answer[Source[EventEnvelope,Any]] {
@@ -36,51 +39,60 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
         }
       })
 
-    	val emitted = TestProbe()
-			val publisher = Source.actorPublisher(Props(
-			  new CassandraRealTimeEvents(cassandraOps, "doc1", pollDelay = 1.milliseconds, nowFunc = now)
-	    )).runWith(Sink.actorRef(emitted.ref, "done"))
+      val emitted = TestProbe()
+      val publisher = Source.actorPublisher(Props(
+        new CassandraRealTimeEvents(cassandraOps, "doc1", pollDelay = 1.milliseconds, nowFunc = now)
+      )).toMat(Sink.actorRef(emitted.ref, "done"))(Keep.left).run()
 
-	    // Allow the publisher to pick up the initialEvents (which it'll do shortly after having queried for initialTime)
+      // Allow the publisher to pick up the initialEvents (which it'll do shortly after having queried for initialTime)
       eventually {
         verify(cassandraOps, atLeastOnce).readEvents("doc1")(initialEvents.size + 1, Long.MaxValue)
       }
+
+      def cleanup () {
+        system.stop(publisher)
+      }
+    }
+
+    def fixture(initialEvents: Seq[EventEnvelope] = Seq.empty)(testcode: Fixture => Any) = {
+      val f = new Fixture(initialEvents)
+      try testcode(f) finally f.cleanup()
     }
 
     "starting with no stored events for its persistence id" should {
-      "not emit anything when starting up" in new Fixture {
-        emitted.expectNoMsg(50.milliseconds)
+      "not emit anything when starting up" in fixture() { f =>
+        f.emitted.expectNoMsg(50.milliseconds)
       }
 
-      "emit any new events that appear in the db, and then wait and poll" in new Fixture {
+      "emit any new events that appear in the db, and then wait and poll" in fixture() { f =>
         val event = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello")
-        events :+= event
-      	emitted.expectMsg(event)
-      	emitted.expectNoMsg(50.milliseconds)
+        f.events :+= event
+        f.emitted.expectMsg(event)
+        f.emitted.expectNoMsg(50.milliseconds)
       }
     }
 
     "starting with some stored events for its persistence id" should {
       val initialEvents = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello") :: Nil
 
-      "not emit anything when starting up" in new Fixture(initialEvents) {
-        emitted.expectNoMsg(50.milliseconds)
+      "not emit anything when starting up" in fixture(initialEvents) { f =>
+        f.emitted.expectNoMsg(50.milliseconds)
       }
 
-      "emit any new events that appear in the db" in new Fixture(initialEvents) {
+      "emit any new events that appear in the db" in fixture(initialEvents) { f =>
         val event = EventEnvelope(startTime.toEpochMilli, "doc1", 2, "hello")
-        events :+= event
-      	emitted.expectMsg(event)
+        f.events :+= event
+        f.emitted.expectMsg(event)
       }
     }
 
     "noticing that the time window for the last emitted real-time event has closed" should {
-      "complete itself" in new Fixture {
+      "complete itself" in fixture() { f =>
         val event = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello")
-        events :+= event
-      	emitted.expectMsg(event)
-      	now = now plusMillis 300000
-      	emitted.expectMsg("done")
+        f.events :+= event
+        f.emitted.expectMsg(event)
+        f.now = f.now plusMillis 300000
+        f.emitted.expectMsg("done")
       }
     }
   }

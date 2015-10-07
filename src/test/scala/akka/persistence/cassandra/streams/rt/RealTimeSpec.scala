@@ -49,53 +49,66 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
         override def isBefore(a: Long, b: Long) = a < b
       }
 
+      // "realtimeActor" is the actor to which we can send simulated actions that occur in real-time
       val (realtimeActor, realtimePublisher) = Source.actorRef[Event](10, OverflowStrategy.fail).toMat(Sink.publisher)(Keep.both).run()
       def getPast(from: Long, to: Long) = Source(pastEvents.from(from).to(to).values.toList)
 
       val receiver = TestProbe("receiver")
-      RealTime.source(getPast, realtimePublisher).runWith(Sink.actorRef(receiver.ref, "complete"))
+      // "realtimeSourceActor" is the actor representing the RealTime instance under test, which is merging
+      // the "realtimeActor" above which invocations the getPast() method.
+      val realtimeSourceActor = RealTime.source(getPast, realtimePublisher).toMat(Sink.actorRef(receiver.ref, "complete"))(Keep.left).run()
+
+      def cleanup() {
+        system.stop(realtimeActor)
+        system.stop(realtimeSourceActor)
+      }
+    }
+
+    def fixture(initialEvents: SortedMap[Long,Event] = SortedMap.empty, initialTime:Long = 0)(testcode: Fixture => Any) = {
+      val f = new Fixture(initialEvents, initialTime)
+      try testcode(f) finally f.cleanup()
     }
 
     "reading from an empty history" should {
-      "transition to forwarding real-time events immediately" in new Fixture {
-        now = 1
-        receiver.expectMsg(emit("hello"))
+      "transition to forwarding real-time events immediately" in fixture() { f =>
+        f.now = 1
+        f.receiver.expectMsg(f.emit("hello"))
 
-        now = 2
-        receiver.expectMsg(emit("world"))
+        f.now = 2
+        f.receiver.expectMsg(f.emit("world"))
       }
     }
 
     "reading from history while real-time events come in with later timestamps" should {
-      "ignore the real-time events until it has seen a historic event and a real-time event with the same timestamp" in new Fixture(
+      "ignore the real-time events until it has seen a historic event and a real-time event with the same timestamp" in fixture (
         initialEvents = SortedMap((1l -> Event(1, "hello")), (2l -> Event(2, "world"))),
         initialTime = 3
-      ){
-        realtimeActor ! Event(3, "should be ignored since no past event with timestamp 3 was seen yet")
+      ){ f =>
+        f.realtimeActor ! Event(3, "should be ignored since no past event with timestamp 3 was seen yet")
 
-        receiver.expectMsg(Event(1, "hello"))
-        receiver.expectMsg(Event(2, "world"))
+        f.receiver.expectMsg(Event(1, "hello"))
+        f.receiver.expectMsg(Event(2, "world"))
         // we emit several realtime+past events, so that the RealTime source is very unlikely to miss them all.
         // however, there's still a race condition that would allow this test to fail.
-        receiver.expectMsg(emit("real-time and past event for timestamp 3"))
+        f.receiver.expectMsg(f.emit("real-time and past event for timestamp 3"))
         Thread.sleep(20)
-        now = 4
-        receiver.expectMsg(emit("real-time and past event for timestamp 4"))
+        f.now = 4
+        f.receiver.expectMsg(f.emit("real-time and past event for timestamp 4"))
         Thread.sleep(20)
-        now = 5
-        receiver.expectMsg(emit("real-time and past event for timestamp 5"))
+        f.now = 5
+        f.receiver.expectMsg(f.emit("real-time and past event for timestamp 5"))
 
         Thread.sleep(20)
         val rtEvent = Event(6, "only sent to real-time, should be forwarded directly")
-        realtimeActor ! rtEvent
-        receiver.expectMsg(rtEvent)
+        f.realtimeActor ! rtEvent
+        f.receiver.expectMsg(rtEvent)
       }
     }
 
     "noticing that the given real-time stream completes" should {
-      "complete itself" in new Fixture {
-        system.stop(realtimeActor)
-        receiver.expectMsg("complete")
+      "complete itself" in fixture() { f =>
+        system.stop(f.realtimeActor)
+        f.receiver.expectMsg("complete")
       }
     }
   }
