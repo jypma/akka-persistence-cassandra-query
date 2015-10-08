@@ -15,17 +15,17 @@ import akka.persistence.cassandra.test.SharedActorSystem
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.testkit.TestProbe
 
-class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
+class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
 
-  "CassandraRealTimeIndex" when {
+  "IndexEntryPoller" when {
 
     val                 noon = Instant.ofEpochSecond(1420113600) // Thu, 01 Jan 2015 12:00:00 GMT
     val secondBeforeMidnight = Instant.ofEpochSecond(1420156799) // Thu, 01 Jan 2015 23:59:59 GMT
     val      startOfTomorrow = Instant.ofEpochSecond(1420156800) // Thu, 01 Jan 2015 00:00:00 GMT
 
     def mkIndexEntry(windowStart: Instant, persistenceId: String) =
-      IndexEntry(CassandraRealTimeIndex.toYearMonthDay(windowStart), windowStart, persistenceId, 0, 0)
+      IndexEntry(IndexEntryPoller.toYearMonthDay(windowStart), windowStart, persistenceId, 0, 0)
 
     class Fixture(
       val initialContent: Set[IndexEntry] = Set.empty,
@@ -41,7 +41,7 @@ class CassandraRealTimeIndexSpec extends WordSpec with Matchers with ScalaFuture
     	when(cassandraOps.readIndexEntriesSince(initialTime minus extTimeWindow)).thenReturn(Source(initialContent.toList))
 
 			val publisher = Source.actorPublisher(Props(
-			  new CassandraRealTimeIndex(cassandraOps, pollDelay = 1.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)
+			  new IndexEntryPoller(cassandraOps, pollDelay = 1.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)
 	    )).toMat(Sink.actorRef(emitted.ref, "done"))(Keep.left).run()
 
 	    // Allow the publisher to pick up the initialContent (which it'll do shortly after having queried for initialTime)

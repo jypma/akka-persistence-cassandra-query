@@ -1,28 +1,35 @@
 package akka.persistence.cassandra.query
 
+import java.time.{ Duration, Instant }
+
 import scala.concurrent.duration.{ DurationInt, FiniteDuration }
-import CassandraRealTimeEvents.{ CassandraDone, Repoll }
+
 import akka.persistence.query.EventEnvelope
 import akka.stream.Materializer
 import akka.stream.actor.ActorPublisher
 import akka.stream.actor.ActorPublisherMessage.{ Cancel, Request }
 import akka.stream.scaladsl.Sink
-import java.time.Duration
-import java.time.Instant
 
-class CassandraRealTimeEvents(
+import PersistenceIdEventsPoller._
+
+/**
+ * ActorPublisher which publishes messages as they become visible in cassandra, for a specific persistenceId.
+ */
+class PersistenceIdEventsPoller(
     cassandraOps: CassandraOps,
     persistenceId: String,
     // longest time window ever stored + allowed clock drift
     extendedTimeWindowLength:Duration = Duration.ofSeconds(120),
     pollDelay: FiniteDuration = 5.seconds,
-    nowFunc: => Instant = Instant.now
+    nowFunc: => Instant = Instant.now,
+    // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
+    // Remember this is PER concurrently accessed persistenceId.
+    maximumQueueSize: Int = 100
 )(implicit m:Materializer) extends ActorPublisher[EventEnvelope] {
   import context.dispatcher
 
   assert(pollDelay.toMillis < extendedTimeWindowLength.toMillis, "poll interval should be (much) less than extended window length")
 
-  // TODO limit queue size
   val queue = collection.mutable.Queue.empty[EventEnvelope]
 
   def receive = { case _ => }
@@ -56,10 +63,15 @@ class CassandraRealTimeEvents(
               s"${persistenceId}: Cassandra delivered decreasing time window offset ${event.offset} for sequence nr ${event.sequenceNr}," +
               s"after already having seen offset ${ofs} for sequence nr $highestSeenSeqNr"))
         }
-        queue += event
-        highestSeenSeqNr = event.sequenceNr
-        highestSeenOffset = Some(event.offset)
-        deliverQueue()
+        if (queue.size >= maximumQueueSize) {
+          onErrorThenStop(new IllegalStateException(
+              s"${persistenceId}: Exceeding maximum queue size of ${maximumQueueSize}"))
+        } else {
+          queue += event
+          highestSeenSeqNr = event.sequenceNr
+          highestSeenOffset = Some(event.offset)
+          deliverQueue()
+        }
 
       case CassandraDone =>
         context.system.scheduler.scheduleOnce(pollDelay, self, Repoll)
@@ -82,7 +94,7 @@ class CassandraRealTimeEvents(
   }
 }
 
-object CassandraRealTimeEvents {
+object PersistenceIdEventsPoller {
   private case object CassandraDone
   private case object Repoll
 }

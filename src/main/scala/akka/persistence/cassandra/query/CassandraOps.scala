@@ -48,7 +48,7 @@ class CassandraOps(
   /**
    * Queries the cassandra index, and then gets the actual events, for the given time window interval, once.
    */
-  def readEvents(persistenceId: String)(fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Any] = {
+  def readEvents(persistenceId: String)(fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Unit] = {
     val startNr = math.max(highestDeletedSequenceNumber(persistenceId) + 1, fromSequenceNr)
     Source(() => from(partitionNr(startNr))).map { partitionNr =>
       selectMessages.execute(persistenceId, partitionNr, startNr)

@@ -20,6 +20,7 @@ import akka.stream.Materializer
 import akka.persistence.query.EventEnvelope
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.persistence.query.scaladsl.EventsByTagQuery
+import akka.actor.Props
 
 /**
  * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
@@ -30,7 +31,7 @@ import akka.persistence.query.scaladsl.EventsByTagQuery
  */
 class CassandraReadJournal(
     cassandraOps: CassandraOps,
-    realtimeIndex: Publisher[IndexEntry],
+    realtimeIndex: Source[IndexEntry,Any],
     nowFunc: => Instant = clockNowFunc
 )(implicit system: ActorSystem, m: Materializer) extends EventsByTagQuery {
 
@@ -55,15 +56,15 @@ class CassandraReadJournal(
   /**
    * Queries the cassandra index, and then gets the actual events, for the given time window interval, once.
    */
-  private def pastEvents(persistenceId:String)(fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Unit] = ???
+  private def pastEvents(persistenceId:String)(fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Unit] =
+    cassandraOps.readEvents(persistenceId)(fromSequenceNr, toSequenceNr)
 
   /**
-   * Returns the publisher that emits real-time events for the given persistenceId.
-   *
-   * TODO Shut down publishers when the time window for their last seen real-time event has been closed,
-   * by removing them from the global map when they're closed.
+   * Manages the pool of sources that emit real-time events for a given persistenceId.
    */
-  private def realtimeEvents(persistenceId:String): Publisher[EventEnvelope] = ???
+  private val realtimeEvents = SourcePool { persistenceId: String =>
+    Source.actorPublisher(Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId)))
+  }
 
   /**
    * Returns a source that combines all past events for [entry.persistenceId] and then

@@ -20,20 +20,20 @@ trait RealTime[Elem,Time] {
 
   /**
    * Returns a source that repeatedly creates [past] Sources (e.g. reading known, persisted elements from disk),
-   * which are expected to catch up with a realtime-broadcasting Publisher [rt] that will inform of elements
+   * which are expected to catch up with a realtime-broadcasting source [rt] that will inform of elements
    * coming in in real-time. Eventually, the returned source will only return the broadcasted events
    * from [rt].
    *
    * The stream completes after having transitioned to real-time, and the [realtime] completes.
    */
-  def source(getPast: (Time, Time) => Source[Elem,Any], realtime: Publisher[Elem]): Source[Elem, ActorRef] = {
+  def source(getPast: (Time, Time) => Source[Elem,Any], realtime: Source[Elem,Any]): Source[Elem, ActorRef] = {
 
     val past = Source.actorRef[Time](2, OverflowStrategy.dropHead).map { startTime =>
       val endTime = chronology.endOfTime
       getPast(startTime, endTime) concat Source.single(SourceCompleted)
     }.flatten(FlattenStrategy.concat)
 
-    val current = Source(realtime).map(RealTimeElem).transform { () => OnComplete(RealtimeCompleted) }
+    val current = realtime.map(RealTimeElem).concat(Source.single(RealtimeCompleted))
 
     val merged = Source(past, current)(Keep.left) { implicit b =>
       (in1, in2) =>
@@ -163,7 +163,7 @@ trait RealTime[Elem,Time] {
 }
 
 object RealTime {
-  def source[Elem,Time](getPast: (Time, Time) => Source[Elem,Any], realtime: Publisher[Elem])
+  def source[Elem,Time](getPast: (Time, Time) => Source[Elem,Any], realtime: Source[Elem,Any])
                        (implicit sys:ActorSystem, ch:Chronology[Elem,Time]): Source[Elem, ActorRef] = {
     new RealTime[Elem,Time] {
       override def chronology = ch

@@ -18,10 +18,10 @@ import akka.persistence.query.EventEnvelope
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.testkit.TestProbe
 
-class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
+class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
 
-  "CassandraRealTimeEvents" when {
+  "PersistenceIdEventsPoller" when {
     val startTime: Instant = Instant.ofEpochSecond(1444053395)
 
     class Fixture(initialEvents: Seq[EventEnvelope] = Seq.empty) {
@@ -41,7 +41,7 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
 
       val emitted = TestProbe()
       val publisher = Source.actorPublisher(Props(
-        new CassandraRealTimeEvents(cassandraOps, "doc1", pollDelay = 1.milliseconds, nowFunc = now)
+        new PersistenceIdEventsPoller(cassandraOps, "doc1", pollDelay = 1.milliseconds, nowFunc = now)
       )).toMat(Sink.actorRef(emitted.ref, "done"))(Keep.left).run()
 
       // Allow the publisher to pick up the initialEvents (which it'll do shortly after having queried for initialTime)

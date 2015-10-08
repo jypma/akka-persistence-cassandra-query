@@ -12,9 +12,12 @@ import akka.stream.actor.ActorPublisher
 import akka.stream.actor.ActorPublisherMessage.{ Cancel, Request }
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 
-import CassandraRealTimeIndex._
+import IndexEntryPoller._
 
-class CassandraRealTimeIndex(
+/**
+ * ActorPublisher which publishes index entries as they become visible in cassandra.
+ */
+class IndexEntryPoller(
     cassandraOps: CassandraOps,
 
     // longest time window ever stored + allowed clock drift
@@ -112,7 +115,7 @@ class CassandraRealTimeIndex(
   }
 }
 
-object CassandraRealTimeIndex {
+object IndexEntryPoller {
   private case object CassandraDone
   private case object Repoll
 
