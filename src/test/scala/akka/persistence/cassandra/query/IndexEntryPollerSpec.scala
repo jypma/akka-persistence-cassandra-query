@@ -38,7 +38,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
     	@volatile var now = initialTime
 
     	val cassandraOps = mock(classOf[CassandraOps])
-    	when(cassandraOps.readIndexEntriesSince(initialTime minus extTimeWindow)).thenReturn(Source(initialContent.toList))
+    	when(cassandraOps.readIndexEntriesOnSameDaySince(initialTime minus extTimeWindow)).thenReturn(Source(initialContent.toList))
 
 			val publisher = Source.actorPublisher(Props(
 			  new IndexEntryPoller(cassandraOps, pollDelay = 1.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)
@@ -46,7 +46,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
 
 	    // Allow the publisher to pick up the initialContent (which it'll do shortly after having queried for initialTime)
       eventually {
-        verify(cassandraOps, atLeastOnce).readIndexEntriesSince(initialTime minus extTimeWindow)
+        verify(cassandraOps, atLeastOnce).readIndexEntriesOnSameDaySince(initialTime minus extTimeWindow)
       }
 
     	def cleanup () {
@@ -70,7 +70,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
         initialContent = Set(mkIndexEntry(noon minusMillis 10, "foo"))
       ){ f =>
         val soon = f.now plusMillis 50
-        when(f.cassandraOps.readIndexEntriesSince(soon minus f.extTimeWindow)).thenReturn(Source(f.initialContent.toList))
+        when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source(f.initialContent.toList))
         f.now = soon
         f.emitted.expectNoMsg(50.milliseconds)
       }
@@ -80,7 +80,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
       "emit the newly found entries" in fixture() { f =>
         val soon = f.now plusMillis 50
         val entry = mkIndexEntry(soon, "foo")
-        when(f.cassandraOps.readIndexEntriesSince(soon minus f.extTimeWindow)).thenReturn(Source.single(entry))
+        when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source.single(entry))
         f.now = soon
         f.emitted.expectMsg(entry)
       }
@@ -92,7 +92,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
       ){ f =>
         val soon = f.now plusMillis 50
         val entry = mkIndexEntry(soon, "bar")
-        when(f.cassandraOps.readIndexEntriesSince(soon minus f.extTimeWindow)).thenReturn(Source(f.initialContent.toList :+ entry))
+        when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source(f.initialContent.toList :+ entry))
 
         f.now = soon
         f.emitted.expectMsg(entry)
@@ -105,14 +105,14 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
       ) { f =>
         val soon = f.now plusMillis 10 // still before midnight
         val todaysEntry = mkIndexEntry(soon, "today")
-        when(f.cassandraOps.readIndexEntriesSince(soon minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
+        when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
         f.now = soon
         f.emitted.expectMsg(todaysEntry)
 
         val tomorrow = f.now plusSeconds 10 // now crossed the date boundary
         val tomorrowsEntry = mkIndexEntry(tomorrow, "tomorrow")
-        when(f.cassandraOps.readIndexEntriesSince(tomorrow minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
-        when(f.cassandraOps.readIndexEntriesSince(startOfTomorrow)).thenReturn(Source.single(tomorrowsEntry))
+        when(f.cassandraOps.readIndexEntriesOnSameDaySince(tomorrow minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
+        when(f.cassandraOps.readIndexEntriesOnSameDaySince(startOfTomorrow)).thenReturn(Source.single(tomorrowsEntry))
         f.now = tomorrow
         f.emitted.expectMsg(tomorrowsEntry)
       }

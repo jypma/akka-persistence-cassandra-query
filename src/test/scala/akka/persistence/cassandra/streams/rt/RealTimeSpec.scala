@@ -10,6 +10,7 @@ import akka.stream.OverflowStrategy
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.stream.stage.{ Context, PushStage }
 import akka.testkit.TestProbe
+import scala.concurrent.duration.DurationInt
 
 class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
 
@@ -56,7 +57,7 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
       val receiver = TestProbe("receiver")
       // "realtimeSourceActor" is the actor representing the RealTime instance under test, which is merging
       // the "realtimeActor" above which invocations the getPast() method.
-      val realtimeSourceActor = RealTime.source(getPast, Source(realtimePublisher)).toMat(Sink.actorRef(receiver.ref, "complete"))(Keep.left).run()
+      val realtimeSourceActor = RealTime.source(getPast, Source(realtimePublisher), 10.milliseconds).toMat(Sink.actorRef(receiver.ref, "complete"))(Keep.left).run()
 
       def cleanup() {
         system.stop(realtimeActor)

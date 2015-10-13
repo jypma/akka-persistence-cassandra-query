@@ -21,26 +21,64 @@ import akka.persistence.query.EventEnvelope
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.persistence.query.scaladsl.EventsByTagQuery
 import akka.actor.Props
+import akka.persistence.query.PersistenceQuery
+import akka.persistence.cassandra.journal.CassandraJournalConfig
+import akka.persistence.cassandra.Cassandra
+import akka.stream.ActorMaterializer
+import akka.persistence.query.ReadJournalProvider
+import akka.stream.scaladsl.Sink
+import akka.stream.scaladsl.Keep
+import scala.concurrent.Future
+import akka.persistence.cassandra.streams.Reaper
 
 /**
  * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
  * that is extended by writing to a time index table.
  *
- * @param realtimeIndex A publisher that publishes `IndexEntry` values whenever new index entries
- * appear in cassandra, in real-time (i.e. eventually, but in order, without duplicates and without skipped entries).
+ * Scala API.
  */
 class CassandraReadJournal(
-    cassandraOps: CassandraOps,
-    realtimeIndex: Source[IndexEntry,Any],
-    nowFunc: => Instant = clockNowFunc
-)(implicit system: ActorSystem, m: Materializer) extends EventsByTagQuery {
+    system: ExtendedActorSystem,
+    config: Config
+) extends ReadJournalProvider with ReadJournal with EventsByTagQuery {
+  import system.dispatcher
+
+  override def scaladslReadJournal() = this
+
+  override def javadslReadJournal() = new japi.CassandraReadJournal(this)
+
+  def now: Instant = Instant.now()
+
+  private implicit val s = system
+  private implicit val m = ActorMaterializer()
+
+  private val journalConfig = new CassandraJournalConfig(system.settings.config.getConfig("cassandra-journal"))
+
+  private val cassandraOps = new CassandraOps(Cassandra(system),
+      s"${journalConfig.keyspace}.${journalConfig.table}",
+      s"${journalConfig.keyspace}.${journalConfig.metadataTable}",
+      s"${journalConfig.keyspace}.${journalConfig.timeIndexTable}",
+      journalConfig.targetPartitionSize)
+
+  private val (realtimeActor, realtimeIndex) =
+    Source.actorPublisher[IndexEntry](Props(new IndexEntryPoller(cassandraOps)))
+          .toMat(Sink.fanoutPublisher(16, 256))(Keep.both)
+          .run()
+
+  /**
+   * Manages the pool of sources that emit real-time events for a given persistenceId.
+   */
+  private val realtimeEvents = SourcePool(16, 256) { persistenceId: String =>
+    Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId))
+  }
 
   override def eventsByTag(tag: String, offset: Long): Source[EventEnvelope, Unit] = {
-   	// TODO actually use the tag to query for events of a different type. Requires an extra column in cassandra.
+    //FIXME uhm we should be using offset somewhere???
+
     val (sink, source) = FanoutAndMerge(byPersistenceId, getEvents)
 
     // Combine past index entries and new, real-time ones into a single logical Source
-    RealTime.source(cassandraOps.pastIndex, realtimeIndex)
+    RealTime.source(cassandraOps.pastIndex, Source(realtimeIndex))
 
       // Filter out duplicate persistenceIds within the same time window
       .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
@@ -60,13 +98,6 @@ class CassandraReadJournal(
     cassandraOps.readEvents(persistenceId)(fromSequenceNr, toSequenceNr)
 
   /**
-   * Manages the pool of sources that emit real-time events for a given persistenceId.
-   */
-  private val realtimeEvents = SourcePool { persistenceId: String =>
-    Source.actorPublisher(Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId)))
-  }
-
-  /**
    * Returns a source that combines all past events for [entry.persistenceId] and then
    * turns to real-time.
    */
@@ -74,10 +105,18 @@ class CassandraReadJournal(
     RealTime.source(cassandraOps.readEvents(entry.persistenceId), realtimeEvents(entry.persistenceId))
   }
 
+  /**
+   * Starts shutting down global services for this CassandraReadJournal. Actual shutdown is asynchronous.
+   */
+  def shutdown(): Future[Unit] = {
+    system.stop(realtimeActor)
+    realtimeEvents.shutdown() zip Reaper(realtimeActor) map (_ => Unit)
+  }
+
   private implicit val indexChronology = new Chronology[IndexEntry,Instant] {
     def getTime(elem: IndexEntry) = elem.window_start
-    def beginningOfTime = Instant.MIN
-    def endOfTime = nowFunc
+    def beginningOfTime = Instant.ofEpochSecond(1444435200) // there are no entries before Oct. 10, 2015
+    def endOfTime = now
     def isBefore(a: Instant, b: Instant) = a.isBefore(b)
   }
 
@@ -91,6 +130,11 @@ class CassandraReadJournal(
 
 
 object CassandraReadJournal {
+  /**
+   *  The argument you should give to <pre>PersistenceQuery(system).readJournalFor</pre> in order to
+   *  get an instance of CassandraReadJournal
+   */
+  val identifier = "akka.persistence.query.journal.cassandra"
 
-  def clockNowFunc = Instant.now()
+  def instance(implicit system: ActorSystem):CassandraReadJournal = PersistenceQuery(system).readJournalFor(identifier)
 }

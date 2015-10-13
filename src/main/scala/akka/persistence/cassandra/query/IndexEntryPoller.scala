@@ -2,17 +2,15 @@ package akka.persistence.cassandra.query
 
 import java.time.{ Duration, Instant }
 import java.util.{ Calendar, TimeZone }
-
 import scala.collection.immutable.TreeSet
 import scala.concurrent.duration.{ DurationInt, FiniteDuration }
-
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.stream.Materializer
 import akka.stream.actor.ActorPublisher
 import akka.stream.actor.ActorPublisherMessage.{ Cancel, Request }
 import akka.stream.scaladsl.{ Keep, Sink, Source }
-
 import IndexEntryPoller._
+import akka.actor.ActorLogging
 
 /**
  * ActorPublisher which publishes index entries as they become visible in cassandra.
@@ -29,7 +27,7 @@ class IndexEntryPoller(
 
     // maximum queue size should be about 10 * (expected number of index entries during [extendedTimeWindowLength])
     maximumQueueSize: Int = 100000
-  )(implicit m:Materializer) extends ActorPublisher[IndexEntry] {
+  )(implicit m:Materializer) extends ActorPublisher[IndexEntry] with ActorLogging {
   import context.dispatcher
 
   val queue = collection.mutable.Queue.empty[IndexEntry]
@@ -40,16 +38,18 @@ class IndexEntryPoller(
   context.become(polling(start = allTimeWindowsClosed, previousEvents = None))
 
   def polling(start: Instant, previousEvents: Option[Set[IndexEntry]]): Receive = {
+    log.debug("Polling from {}", start);
     var entries = TreeSet.empty[IndexEntry](Ordering.by { i => (i.window_start, i.persistenceId) })
     concatOpt(
-      cassandraOps.readIndexEntriesSince(start),
+      cassandraOps.readIndexEntriesOnSameDaySince(start),
       nextDayWithinExtendedTimeWindow(start).map { nextDay =>
-        cassandraOps.readIndexEntriesSince(nextDay)
+        cassandraOps.readIndexEntriesOnSameDaySince(nextDay)
       }
     ).runWith(Sink.actorRef(self, CassandraDone))
 
     {
       case entry:IndexEntry =>
+        log.debug("Seen {}", entry);
         entries += entry
 
       case CassandraDone =>
@@ -109,8 +109,11 @@ class IndexEntryPoller(
   }
 
   def deliverQueue() {
+    log.debug("deliverQueue: active {}, demand {}, queue {}", isActive, totalDemand, queue.size)
     while (isActive && totalDemand > 0 && !queue.isEmpty) {
-      onNext(queue.dequeue())
+      val item = queue.dequeue()
+      log.debug("Delivering {}", item)
+      onNext(item)
     }
   }
 }

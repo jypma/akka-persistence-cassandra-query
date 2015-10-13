@@ -12,12 +12,22 @@ import akka.util.Timeout
 import scala.concurrent.duration._
 import akka.stream.scaladsl.FlattenStrategy
 import akka.persistence.cassandra.streams.WhenComplete
+import akka.persistence.cassandra.streams.Reaper
+import akka.actor.ActorRef
+import akka.stream.scaladsl.Sink
+import akka.stream.scaladsl.Keep
+import akka.stream.Materializer
+import akka.actor.Terminated
 
 /**
- * Manages a pool of Source[T] instances, managed by key. It does not preserve the materialized
- * value of the sources created by the [factory] argument.
+ * Manages a pool of Source[T] instances, managed by key, backed by actor publishers. The created
+ * actor publishers are expected to keep running and be re-used for multiple sources.
+ *
+ * Internally, this is done by using Sink.fanoutPublisher with the given arguments.
+ *
+ * @param factory Should return a Props for an ActorPublisher that emits messages of type T.
  */
-class SourcePool[T,K](factory: K => Source[T,Any])(implicit system: ActorSystem) {
+class SourcePool[T,K](factory: K => Props, initialBufferSize: Int, maximumBufferSize: Int)(implicit system: ActorSystem, m:Materializer) {
   private val actor = system.actorOf(Props(new ManagerActor()))
 
   private implicit val timeout = Timeout(1.second)
@@ -26,24 +36,53 @@ class SourcePool[T,K](factory: K => Source[T,Any])(implicit system: ActorSystem)
     Source((actor ask GetSource(key)).mapTo[Source[T,Any]]).flatten(FlattenStrategy.concat)
   }
 
+  def shutdown(): Future[Unit] = {
+    actor ! Shutdown
+    Reaper(actor)
+  }
+
   private class ManagerActor extends Actor {
-    val sources = collection.mutable.Map.empty[K,Source[T,Any]]
+    val running = collection.mutable.Map.empty[K,(ActorRef, Publisher[T])]
 
     def receive = {
       case GetSource(key) =>
-        sender ! sources.getOrElseUpdate(key, {
-          factory(key).transform { () => WhenComplete(self ! Completed(key)) }
-        })
+        sender ! Source(running.getOrElseUpdate(key, {
+          Source.actorPublisher[T](factory(key))
+                .transform { () => WhenComplete(self ! Completed(key)) }
+                .toMat(Sink.fanoutPublisher(initialBufferSize, maximumBufferSize))(Keep.both)
+                .run()
+        })._2)
 
       case Completed(key) =>
-        sources.remove(key)
+        running.remove(key)
+
+      case Shutdown =>
+        val awaitingActors = running.values.map(_._1).toSet
+        awaitingActors.foreach(context.watch)
+        awaitingActors.foreach(context.stop)
+        context become shuttingDown(awaitingActors)
+    }
+
+    def shuttingDown(awaiting: Set[ActorRef]): Receive = {
+      if (awaiting.isEmpty) {
+        context.stop(self)
+      }
+
+      {
+        case Terminated(actor) if awaiting.contains(actor) =>
+          context become shuttingDown(awaiting - actor)
+      }
     }
   }
 
+  private case object Shutdown
   private case class GetSource(key: K)
   private case class Completed(key: K)
 }
 
 object SourcePool {
-  def apply[T,K](factory: K => Source[T,Any])(implicit system: ActorSystem) = new SourcePool(factory)
+  def apply[T,K](initialBufferSize: Int, maximumBufferSize: Int)(factory: K => Props)
+                (implicit system: ActorSystem, m:Materializer): SourcePool[T,K] =
+    new SourcePool(factory, initialBufferSize, maximumBufferSize)
+
 }

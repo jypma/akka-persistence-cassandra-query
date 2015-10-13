@@ -6,6 +6,12 @@ import akka.actor.{ActorRef, ActorSystem}
 import com.datastax.driver.core.Row
 import scala.collection.JavaConverters.iterableAsScalaIterableConverter
 import scala.concurrent.blocking
+import java.util.concurrent.atomic.AtomicReference
+import scala.util.Try
+import com.datastax.driver.core.exceptions.InvalidQueryException
+import java.time.Instant
+import java.time.Instant
+import java.util.Date
 
 trait Cassandra {
   import Cassandra._
@@ -21,7 +27,7 @@ object Cassandra {
   trait PreparedStatement {}
 
   trait PreparedSelectStatement[T] extends PreparedStatement {
-    def execute(args: Any*): Source[T, ActorRef]
+    def execute(args: Any*): Source[T, Any]
 
     def executeBlocking(args: Any*): Iterator[T]
   }
@@ -41,7 +47,12 @@ object Cassandra {
       val preparedStmt = session.prepare(cql).setConsistencyLevel(config.readConsistency)
 
       def mkStatement(args: Seq[Any]) = {
-        val stmt = preparedStmt.bind(args.map(_.asInstanceOf[AnyRef]) : _*)
+        val stmt = preparedStmt.bind(args.map {
+          case instant:Instant =>
+            new Date(instant.toEpochMilli)
+          case other =>
+            other.asInstanceOf[AnyRef]
+        }: _*)
         if (fetchSize > 0) {
           stmt.setFetchSize(fetchSize)
         }
@@ -49,6 +60,7 @@ object Cassandra {
       }
 
       override def execute(args: Any*): Source[T, ActorRef] = {
+        println("  execute " + cql + " with " + args)
     	  ResultSetActorPublisher.source(session.executeAsync(mkStatement(args)), implicitly[RowMapper[T]])
       }
 
