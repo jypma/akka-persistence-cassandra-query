@@ -29,7 +29,7 @@ object FanoutAndMerge {
       actor => mergeOutProxy ! actor
     }
 
-    (Sink.actorSubscriber(Props(new FanoutActor(getKey,getSource,mergeOutProxy))).mapMaterializedValue { x => }, mergeOut)
+    (Sink.actorSubscriber(Props(new FanoutActor(getKey,getSource,mergeOutProxy))).named("fanout").mapMaterializedValue { x => }, mergeOut.named("merge"))
   }
 
   /**
@@ -158,7 +158,7 @@ object FanoutAndMerge {
       out: ActorRef)
       (implicit m:Materializer) extends ActorSubscriber {
 
-	  val mergeIn = Sink.actorSubscriber(Props(classOf[MergeInActor], self, out))
+	  val mergeIn = Sink.actorSubscriber(Props(classOf[MergeInActor], self, out)).named("mergeIn")
 
     val inProgress = collection.mutable.Set.empty[Key]
 	  val keyForActor = collection.mutable.Map.empty[ActorRef,Key]

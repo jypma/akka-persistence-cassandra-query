@@ -17,6 +17,7 @@ libraryDependencies ++= {
   Seq(
     "com.typesafe.akka" %% "akka-actor" % akkaVersion,
     "com.typesafe.akka" %% "akka-testkit" % akkaVersion % "test",
+    "com.typesafe.akka" %% "akka-slf4j" % akkaVersion % "test",
     "com.typesafe.akka" %% "akka-persistence" % akkaVersion,
     "com.typesafe.akka" %% "akka-persistence-query-experimental" % akkaVersion,
     "com.typesafe.akka" %% "akka-http-experimental" % akkaStreamVersion
@@ -31,9 +32,15 @@ libraryDependencies += "org.iq80.leveldb" % "leveldb" % "0.7" % "test" // only t
 
 libraryDependencies += "com.datastax.cassandra"  % "cassandra-driver-core" % "2.1.8"
 
+libraryDependencies += "org.cassandraunit" % "cassandra-unit" % "2.1.9.2" % "test"
+
 libraryDependencies += "org.scalatest" %% "scalatest" % "2.2.4" % "test"
 
 libraryDependencies += "org.mockito" % "mockito-core" % "1.10.19" % "test"
+
+libraryDependencies += "org.slf4j" % "slf4j-log4j12" % "1.7.12" % "test"
+
+libraryDependencies += "com.typesafe.scala-logging" %% "scala-logging" % "3.1.0"
 
 //scapegoatIgnoredFiles := Seq(".*/src_managed/main/.*")
 

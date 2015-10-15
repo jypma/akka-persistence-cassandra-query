@@ -2,19 +2,21 @@ package akka.persistence.cassandra.query
 
 import java.time.{ Duration, Instant }
 import java.util.{ Calendar, TimeZone }
-
 import scala.collection.immutable.TreeSet
 import scala.concurrent.duration.{ DurationInt, FiniteDuration }
-
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.stream.Materializer
-import akka.stream.actor.ActorPublisher
-import akka.stream.actor.ActorPublisherMessage.{ Cancel, Request }
 import akka.stream.scaladsl.{ Keep, Sink, Source }
+import IndexEntryPoller._
+import akka.actor.ActorLogging
+import akka.actor.ActorRef
+import akka.actor.Actor
+import akka.actor.Terminated
 
-import CassandraRealTimeIndex._
-
-class CassandraRealTimeIndex(
+/**
+ * Actor which publishes index entries as they become visible in cassandra.
+ */
+class IndexEntryPoller(
     cassandraOps: CassandraOps,
 
     // longest time window ever stored + allowed clock drift
@@ -26,9 +28,10 @@ class CassandraRealTimeIndex(
 
     // maximum queue size should be about 10 * (expected number of index entries during [extendedTimeWindowLength])
     maximumQueueSize: Int = 100000
-  )(implicit m:Materializer) extends ActorPublisher[IndexEntry] {
+  )(implicit m:Materializer) extends Actor with ActorLogging {
   import context.dispatcher
 
+  val targets = collection.mutable.Set.empty[ActorRef]
   val queue = collection.mutable.Queue.empty[IndexEntry]
 
   def allTimeWindowsClosed = nowFunc minus extendedTimeWindowLength
@@ -37,25 +40,27 @@ class CassandraRealTimeIndex(
   context.become(polling(start = allTimeWindowsClosed, previousEvents = None))
 
   def polling(start: Instant, previousEvents: Option[Set[IndexEntry]]): Receive = {
+    log.debug("Polling from {}", start);
     var entries = TreeSet.empty[IndexEntry](Ordering.by { i => (i.window_start, i.persistenceId) })
     concatOpt(
-      cassandraOps.readIndexEntriesSince(start),
+      cassandraOps.readIndexEntriesOnSameDaySince(start),
       nextDayWithinExtendedTimeWindow(start).map { nextDay =>
-        cassandraOps.readIndexEntriesSince(nextDay)
+        cassandraOps.readIndexEntriesOnSameDaySince(nextDay)
       }
     ).runWith(Sink.actorRef(self, CassandraDone))
 
     {
       case entry:IndexEntry =>
+        log.debug("Seen {}", entry);
         entries += entry
 
       case CassandraDone =>
         for (previous <- previousEvents) {
           val newItems = entries.diff(previous)
           if (queue.size + newItems.size > maximumQueueSize) {
-            onErrorThenStop(new IllegalStateException(
+            throw new IllegalStateException(
                 s"Attempting to add ${newItems.size} items to current queue of size" +
-                s"${queue.size}, which would exceed the maximum of ${maximumQueueSize}"))
+                s"${queue.size}, which would exceed the maximum of ${maximumQueueSize}")
           } else {
         	  queue ++= newItems
         	  deliverQueue()
@@ -67,11 +72,14 @@ class CassandraRealTimeIndex(
         val threshold = allTimeWindowsClosed
         context become polling(threshold, Some(entriesToRemember(threshold, entries)))
 
-      case Request(_) =>
-        deliverQueue()
+      case Subscribe =>
+        log.debug("Subscribed {}", sender)
+        context.watch(sender)
+        targets += sender
 
-      case Cancel =>
-        onCompleteThenStop()
+      case Terminated(actor) =>
+        log.debug("Lost {}", sender)
+        targets -= actor
     }
   }
 
@@ -106,13 +114,18 @@ class CassandraRealTimeIndex(
   }
 
   def deliverQueue() {
-    while (isActive && totalDemand > 0 && !queue.isEmpty) {
-      onNext(queue.dequeue())
+    log.debug("deliverQueue of size {} to {} subscribers", queue.size, targets.size)
+    while (!queue.isEmpty) {
+      val item = queue.dequeue()
+      log.debug("Delivering {}", item)
+      for (t <- targets) t ! item
     }
   }
 }
 
-object CassandraRealTimeIndex {
+object IndexEntryPoller {
+  case object Subscribe
+
   private case object CassandraDone
   private case object Repoll
 

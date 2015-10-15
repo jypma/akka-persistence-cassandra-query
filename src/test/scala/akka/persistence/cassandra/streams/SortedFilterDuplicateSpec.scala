@@ -2,11 +2,14 @@ package akka.persistence.cassandra.streams
 
 import org.scalatest.{ Matchers, WordSpec }
 import org.scalatest.concurrent.ScalaFutures
-
 import akka.persistence.cassandra.test.SharedActorSystem
 import akka.stream.scaladsl.{ Sink, Source }
+import org.scalatest.time.Span
+import org.scalatest.time.Seconds
 
 class SortedFilterDuplicateSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
+  implicit val patience = PatienceConfig(timeout = Span(2, Seconds)) // actual run-time on 4-core machine: 0.2s
+
   def toSequence[T] = Sink.fold[Seq[T],T](Seq.empty)((seq, elem) => seq :+ elem)
 
   "A SortedFilterDuplicate operation" when {

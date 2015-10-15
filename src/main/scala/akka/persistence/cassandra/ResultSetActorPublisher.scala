@@ -41,6 +41,9 @@ class ResultSetActorPublisher[T](
       deliver(resultSet)
       unstashAll()
 
+    case Request(_) =>
+      // ignore for now
+
     case other =>
       stash()
   }
@@ -57,9 +60,10 @@ class ResultSetActorPublisher[T](
   }
 
   private def deliver(resultSet: ResultSet): Unit = {
+    log.debug("delivering, {} available, exhausted: {}, demand: {}, completed: {}", resultSet.getAvailableWithoutFetching, resultSet.isExhausted, totalDemand, isCompleted)
     if (resultSet.isExhausted()) {
       if (!isCompleted) {
-        onComplete()
+        onCompleteThenStop()
       }
     } else {
       if (totalDemand > 0) {
@@ -71,8 +75,10 @@ class ResultSetActorPublisher[T](
             val demand: Int = if (totalDemand < Int.MaxValue) totalDemand.toInt else Int.MaxValue
             log.debug("Have {} rows available, demand is {}", availableRowCount, demand)
             (1 to Math.min(availableRowCount, demand)) foreach { _ =>
-              onNext(resultSet.one())
+              val elem = resultSet.one(): T
+              onNext(elem)
             }
+            deliver(resultSet)
         }
       }
     }

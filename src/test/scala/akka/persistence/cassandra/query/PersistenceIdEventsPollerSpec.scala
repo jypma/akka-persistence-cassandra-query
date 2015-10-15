@@ -18,10 +18,10 @@ import akka.persistence.query.EventEnvelope
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.testkit.TestProbe
 
-class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
+class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
 
-  "CassandraRealTimeEvents" when {
+  "PersistenceIdEventsPoller" when {
     val startTime: Instant = Instant.ofEpochSecond(1444053395)
 
     class Fixture(initialEvents: Seq[EventEnvelope] = Seq.empty) {
@@ -40,9 +40,9 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
       })
 
       val emitted = TestProbe()
-      val publisher = Source.actorPublisher(Props(
-        new CassandraRealTimeEvents(cassandraOps, "doc1", pollDelay = 1.milliseconds, nowFunc = now)
-      )).toMat(Sink.actorRef(emitted.ref, "done"))(Keep.left).run()
+      val poller = system.actorOf(Props(
+        new PersistenceIdEventsPoller(cassandraOps, "doc1", pollDelay = 1.milliseconds, nowFunc = now)))
+      emitted.send(poller, PersistenceIdEventsPoller.Subscribe)
 
       // Allow the publisher to pick up the initialEvents (which it'll do shortly after having queried for initialTime)
       eventually {
@@ -50,7 +50,7 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
       }
 
       def cleanup () {
-        system.stop(publisher)
+        system.stop(poller)
       }
     }
 
@@ -88,11 +88,13 @@ class CassandraRealTimeEventsSpec extends WordSpec with Matchers with ScalaFutur
 
     "noticing that the time window for the last emitted real-time event has closed" should {
       "complete itself" in fixture() { f =>
+        f.emitted.watch(f.poller)
+
         val event = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello")
         f.events :+= event
         f.emitted.expectMsg(event)
         f.now = f.now plusMillis 300000
-        f.emitted.expectMsg("done")
+        f.emitted.expectTerminated(f.poller, 1.second)
       }
     }
   }
