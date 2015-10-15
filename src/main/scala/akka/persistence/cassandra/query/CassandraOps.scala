@@ -14,6 +14,9 @@ import CassandraOps._
 import akka.persistence.cassandra.streams.ConcatWhenEmpty
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
+import akka.stream.Attributes
+import akka.persistence.cassandra.streams.Sequential
+import com.typesafe.scalalogging.StrictLogging
 
 class CassandraOps(
   cassandra: Cassandra,
@@ -21,7 +24,7 @@ class CassandraOps(
   metadataTableName: String,
   timeIndexTableName: String,
   targetPartitionSize: Int
-) {
+) extends StrictLogging {
   retryWithin(30.seconds, 1.second) {
     // Once this query can run, our tables are created and ready.
     cassandra.prepareSelect(s"SELECT year_month_day FROM ${timeIndexTableName} WHERE year_month_day = 0")(r => r).execute()
@@ -32,7 +35,7 @@ class CassandraOps(
    * Queries cassandra for the given time window interval, once.
    */
   def pastIndex(from: Instant, to: Instant): Source[IndexEntry,Unit] = {
-    println("*** indexing from " + from + " to " + to)
+    logger.debug("Indexing from {} to {}", from, to)
 
     val startDay = toYearMonthDay(from)
     val endDay = toYearMonthDay(to)
@@ -40,7 +43,7 @@ class CassandraOps(
     Source(startDay.to(endDay))
       .map(day => entriesForDay(day, from, to))
       .flatten(FlattenStrategy.concat)
-      .log("pastIndex from " + from + " to " + to)
+      .named("pastIndex")
   }
 
   private def entriesForDay(day: Int, from: Instant, to: Instant): Source[IndexEntry,Any] = {
@@ -50,15 +53,15 @@ class CassandraOps(
   def readIndexEntriesOnSameDaySince(start: Instant): Source[IndexEntry,Any] =
     selectEventsSince.execute(toYearMonthDay(start), start)
 
-  private case object WasEmpty
   /**
    * Queries the cassandra index, and then gets the actual events, for the given time window interval, once.
    */
   def readEvents(persistenceId: String)(fromSequenceNr: Long, toSequenceNr: Long): Source[EventEnvelope,Unit] = {
     val startNr = math.max(highestDeletedSequenceNumber(persistenceId) + 1, fromSequenceNr)
-    Source(() => from(partitionNr(startNr))).map { partitionNr =>
-      selectMessages.execute(persistenceId, partitionNr, startNr).transform(() => ConcatWhenEmpty(WasEmpty))
-    }.flatten(FlattenStrategy.concat).takeWhile(_ != WasEmpty).asInstanceOf[Source[EventEnvelope,Unit]]
+    Sequential.forEachUntilEmpty(partitionNr(startNr))(_ + 1) { partitionNr =>
+      logger.debug("Reading events of {} from partition {}", persistenceId, partitionNr.asInstanceOf[AnyRef])
+      selectMessages.execute(persistenceId, partitionNr, startNr)
+    }
   }
 
   def findHighestSequenceNr(persistenceId: String, fromSequenceNr: Long = 0) = {

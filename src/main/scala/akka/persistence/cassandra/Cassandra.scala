@@ -12,6 +12,7 @@ import com.datastax.driver.core.exceptions.InvalidQueryException
 import java.time.Instant
 import java.time.Instant
 import java.util.Date
+import java.util.concurrent.atomic.AtomicInteger
 
 trait Cassandra {
   import Cassandra._
@@ -22,6 +23,8 @@ trait Cassandra {
 }
 
 object Cassandra {
+  val idx = new AtomicInteger
+
   type RowMapper[T] = Row => T
 
   trait PreparedStatement {}
@@ -59,8 +62,7 @@ object Cassandra {
         stmt
       }
 
-      override def execute(args: Any*): Source[T, ActorRef] = {
-        println("  execute " + cql + " with " + args)
+      override def execute(args: Any*): Source[T, Any] = {
     	  ResultSetActorPublisher.source(session.executeAsync(mkStatement(args)), implicitly[RowMapper[T]])
       }
 

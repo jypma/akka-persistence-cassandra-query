@@ -57,7 +57,7 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
       val receiver = TestProbe("receiver")
       // "realtimeSourceActor" is the actor representing the RealTime instance under test, which is merging
       // the "realtimeActor" above which invocations the getPast() method.
-      val realtimeSourceActor = RealTime.source(getPast, Source(realtimePublisher), 10.milliseconds).toMat(Sink.actorRef(receiver.ref, "complete"))(Keep.left).run()
+      val realtimeSourceActor = RealTime(getPast, Source(realtimePublisher), 10.milliseconds).toMat(Sink.actorRef(receiver.ref, "complete"))(Keep.left).run()
 
       def cleanup() {
         system.stop(realtimeActor)

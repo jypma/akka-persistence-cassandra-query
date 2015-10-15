@@ -29,6 +29,7 @@ import akka.actor.Status.Failure
 import java.io.ByteArrayInputStream
 import java.io.ObjectInputStream
 import org.scalatest.concurrent.ScalaFutures
+import akka.persistence.cassandra.streams.Reaper
 
 
 object CassandraReadJournalIntegrationSpec {
@@ -64,8 +65,6 @@ object CassandraReadJournalIntegrationSpec {
     def handle: Receive = {
       case payload: String =>
         probe ! payload
-        probe ! lastSequenceNr
-        probe ! recoveryRunning
     }
   }
 }
@@ -75,12 +74,16 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
 
   "the CassandraReadJournal" when {
     "listening on an empty database" should {
-      "discover real-time events as they are added, across partition boundaries" in {
+
+      "pick up a single event and send it to a single running query" in {
         val testStart = System.currentTimeMillis()
 
         val probe = TestProbe()
         val doc = system.actorOf(Props(classOf[DocumentActor], probe.ref), "document-1")
         doc ! "change-1"
+        probe.within(1.minute) {
+          probe.expectMsg("change-1") // we know it's persisted once it hits the probe
+        }
 
         val received = TestProbe()
 
@@ -100,12 +103,47 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         }
 
         system.stop(received.ref)
+        system.stop(doc)
+        Reaper(received.ref,doc).futureValue
         journal.shutdown().futureValue
       }
 
       "eventually send all generated events to all clients" in {
+        val probe = TestProbe()
+        val doc = system.actorOf(Props(classOf[DocumentActor], probe.ref), "document-1")
+        val journal = CassandraReadJournal.instance
 
+        val messageCount = 100
+        val queries = for (i <- 0 to messageCount) yield {
+          Thread.sleep(10)
+          doc ! s"change-{i}"
+          probe.expectMsgType[String] // we know it's persisted once it hits the probe
+          val received = TestProbe()
+          journal.eventsByTag("_all", 0).runWith(Sink.actorRef(received.ref, "complete"))
+          received
+        }
+
+        for (i <- 0 to messageCount) {
+          val q = queries(i)
+          for (j <- 0 to messageCount) {
+            q.within(1.minute) {
+            	q.expectMsgType[EventEnvelope]
+            }
+          }
+        }
+
+        for (i <- 0 to messageCount) system.stop(queries(i).ref)
+        system.stop(doc)
+        Reaper(queries.map(_.ref) :+ doc).futureValue
+        journal.shutdown().futureValue
       }
+
+      /*
+      "discover real-time events as they are added, across partition boundaries" in {
+        pending
+      }
+      * /
+      */
     }
   }
 

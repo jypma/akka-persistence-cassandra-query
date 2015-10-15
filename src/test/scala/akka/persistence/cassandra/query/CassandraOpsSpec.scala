@@ -12,8 +12,12 @@ import org.scalatest.concurrent.ScalaFutures
 import java.time.Instant
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.persistence.query.EventEnvelope
+import org.scalatest.time.Seconds
+import org.scalatest.time.Span
 
 class CassandraOpsSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
+  implicit val patience = PatienceConfig(timeout = Span(2, Seconds))
+
   import CassandraOpsSpec._
 
   class Fixture (

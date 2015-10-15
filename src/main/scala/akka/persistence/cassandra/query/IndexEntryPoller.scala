@@ -6,14 +6,15 @@ import scala.collection.immutable.TreeSet
 import scala.concurrent.duration.{ DurationInt, FiniteDuration }
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.stream.Materializer
-import akka.stream.actor.ActorPublisher
-import akka.stream.actor.ActorPublisherMessage.{ Cancel, Request }
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import IndexEntryPoller._
 import akka.actor.ActorLogging
+import akka.actor.ActorRef
+import akka.actor.Actor
+import akka.actor.Terminated
 
 /**
- * ActorPublisher which publishes index entries as they become visible in cassandra.
+ * Actor which publishes index entries as they become visible in cassandra.
  */
 class IndexEntryPoller(
     cassandraOps: CassandraOps,
@@ -27,9 +28,10 @@ class IndexEntryPoller(
 
     // maximum queue size should be about 10 * (expected number of index entries during [extendedTimeWindowLength])
     maximumQueueSize: Int = 100000
-  )(implicit m:Materializer) extends ActorPublisher[IndexEntry] with ActorLogging {
+  )(implicit m:Materializer) extends Actor with ActorLogging {
   import context.dispatcher
 
+  val targets = collection.mutable.Set.empty[ActorRef]
   val queue = collection.mutable.Queue.empty[IndexEntry]
 
   def allTimeWindowsClosed = nowFunc minus extendedTimeWindowLength
@@ -56,9 +58,9 @@ class IndexEntryPoller(
         for (previous <- previousEvents) {
           val newItems = entries.diff(previous)
           if (queue.size + newItems.size > maximumQueueSize) {
-            onErrorThenStop(new IllegalStateException(
+            throw new IllegalStateException(
                 s"Attempting to add ${newItems.size} items to current queue of size" +
-                s"${queue.size}, which would exceed the maximum of ${maximumQueueSize}"))
+                s"${queue.size}, which would exceed the maximum of ${maximumQueueSize}")
           } else {
         	  queue ++= newItems
         	  deliverQueue()
@@ -70,11 +72,14 @@ class IndexEntryPoller(
         val threshold = allTimeWindowsClosed
         context become polling(threshold, Some(entriesToRemember(threshold, entries)))
 
-      case Request(_) =>
-        deliverQueue()
+      case Subscribe =>
+        log.debug("Subscribed {}", sender)
+        context.watch(sender)
+        targets += sender
 
-      case Cancel =>
-        onCompleteThenStop()
+      case Terminated(actor) =>
+        log.debug("Lost {}", sender)
+        targets -= actor
     }
   }
 
@@ -109,16 +114,18 @@ class IndexEntryPoller(
   }
 
   def deliverQueue() {
-    log.debug("deliverQueue: active {}, demand {}, queue {}", isActive, totalDemand, queue.size)
-    while (isActive && totalDemand > 0 && !queue.isEmpty) {
+    log.debug("deliverQueue of size {} to {} subscribers", queue.size, targets.size)
+    while (!queue.isEmpty) {
       val item = queue.dequeue()
       log.debug("Delivering {}", item)
-      onNext(item)
+      for (t <- targets) t ! item
     }
   }
 }
 
 object IndexEntryPoller {
+  case object Subscribe
+
   private case object CassandraDone
   private case object Repoll
 

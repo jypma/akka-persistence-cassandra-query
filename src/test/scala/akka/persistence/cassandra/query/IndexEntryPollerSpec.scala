@@ -40,9 +40,9 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
     	val cassandraOps = mock(classOf[CassandraOps])
     	when(cassandraOps.readIndexEntriesOnSameDaySince(initialTime minus extTimeWindow)).thenReturn(Source(initialContent.toList))
 
-			val publisher = Source.actorPublisher(Props(
-			  new IndexEntryPoller(cassandraOps, pollDelay = 1.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)
-	    )).toMat(Sink.actorRef(emitted.ref, "done"))(Keep.left).run()
+    	val poller = system.actorOf(Props(
+			  new IndexEntryPoller(cassandraOps, pollDelay = 1.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)))
+			emitted.send(poller, IndexEntryPoller.Subscribe)
 
 	    // Allow the publisher to pick up the initialContent (which it'll do shortly after having queried for initialTime)
       eventually {
@@ -50,7 +50,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
       }
 
     	def cleanup () {
-    	  system.stop(publisher)
+    	  system.stop(poller)
     	}
     }
 

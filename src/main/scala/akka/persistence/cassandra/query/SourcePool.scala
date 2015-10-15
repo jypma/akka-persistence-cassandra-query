@@ -18,71 +18,57 @@ import akka.stream.scaladsl.Sink
 import akka.stream.scaladsl.Keep
 import akka.stream.Materializer
 import akka.actor.Terminated
+import akka.stream.OverflowStrategy
 
 /**
- * Manages a pool of Source[T] instances, managed by key, backed by actor publishers. The created
- * actor publishers are expected to keep running and be re-used for multiple sources.
+ * Manages a pool of Source[T] instances, managed by key, backed by actors. The actor
+ * implementation must react to the [subscribeMessage] by starting to send its events
+ * to the sender of [subscribeMessage].
  *
- * Internally, this is done by using Sink.fanoutPublisher with the given arguments.
+ * Internally, each materialization is a Source.actorRef with the given [bufferSize] and OverflowStrategy.fail.
  *
- * @param factory Should return a Props for an ActorPublisher that emits messages of type T.
+ * @param factory Should return a Props for an Actor that emits messages of type T.
  */
-class SourcePool[T,K](factory: K => Props, initialBufferSize: Int, maximumBufferSize: Int)(implicit system: ActorSystem, m:Materializer) {
-  private val actor = system.actorOf(Props(new ManagerActor()))
+class SourcePool[T,K](factory: K => Props, subscribeMessage: Any, bufferSize: Int)(implicit system: ActorSystem, m:Materializer) {
+  private val manager = system.actorOf(Props(new ManagerActor()))
 
   private implicit val timeout = Timeout(1.second)
 
   def apply(key: K): Source[T,Unit] = {
-    Source((actor ask GetSource(key)).mapTo[Source[T,Any]]).flatten(FlattenStrategy.concat)
+    Source.actorRef(bufferSize, OverflowStrategy.fail).mapMaterializedValue { actor =>
+      manager.tell(AddSubscription(key), actor)
+    }
   }
 
   def shutdown(): Future[Unit] = {
-    actor ! Shutdown
-    Reaper(actor)
+    system.stop(manager)
+    Reaper(manager)
   }
 
   private class ManagerActor extends Actor {
-    val running = collection.mutable.Map.empty[K,(ActorRef, Publisher[T])]
+    val running = collection.mutable.Map.empty[K,ActorRef]
+    val keyForActor = collection.mutable.Map.empty[ActorRef,K]
 
     def receive = {
-      case GetSource(key) =>
-        sender ! Source(running.getOrElseUpdate(key, {
-          Source.actorPublisher[T](factory(key))
-                .transform { () => WhenComplete(self ! Completed(key)) }
-                .toMat(Sink.fanoutPublisher(initialBufferSize, maximumBufferSize))(Keep.both)
-                .run()
-        })._2)
+      case AddSubscription(key) =>
+        val worker = running.getOrElseUpdate(key, {
+          val actor = context.actorOf(factory(key), key.toString)
+          context.watch(actor)
+          keyForActor(actor) = key
+          actor
+        })
+        worker.tell(subscribeMessage, sender)
 
-      case Completed(key) =>
-        running.remove(key)
-
-      case Shutdown =>
-        val awaitingActors = running.values.map(_._1).toSet
-        awaitingActors.foreach(context.watch)
-        awaitingActors.foreach(context.stop)
-        context become shuttingDown(awaitingActors)
-    }
-
-    def shuttingDown(awaiting: Set[ActorRef]): Receive = {
-      if (awaiting.isEmpty) {
-        context.stop(self)
-      }
-
-      {
-        case Terminated(actor) if awaiting.contains(actor) =>
-          context become shuttingDown(awaiting - actor)
-      }
+      case Terminated(actor) =>
+        running.remove(keyForActor(actor))
     }
   }
 
-  private case object Shutdown
-  private case class GetSource(key: K)
-  private case class Completed(key: K)
+  private case class AddSubscription(key: K)
 }
 
 object SourcePool {
-  def apply[T,K](initialBufferSize: Int, maximumBufferSize: Int)(factory: K => Props)
+  def apply[T,K](subscribeMessage: Any, bufferSize: Int)(factory: K => Props)
                 (implicit system: ActorSystem, m:Materializer): SourcePool[T,K] =
-    new SourcePool(factory, initialBufferSize, maximumBufferSize)
-
+    new SourcePool(factory, subscribeMessage, bufferSize)
 }

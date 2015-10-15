@@ -12,10 +12,17 @@ object Reaper {
   /**
    * Returns a future that completes when all given actor refs have terminated.
    */
-  def apply(refs: ActorRef*)(implicit system:ActorSystem): Future[Unit] = {
+  def apply(refs: Iterable[ActorRef])(implicit system:ActorSystem): Future[Unit] = {
     val p = Promise[Unit]
     system.actorOf(Props(new Reaper(refs.toSeq, p)))
     p.future
+  }
+
+  /**
+   * Returns a future that completes when all given actor refs have terminated.
+   */
+  def apply(refs: ActorRef*)(implicit system:ActorSystem): Future[Unit] = {
+    apply(refs.toIterable)
   }
 }
 

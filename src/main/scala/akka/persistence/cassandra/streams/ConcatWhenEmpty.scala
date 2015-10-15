@@ -15,7 +15,7 @@ object ConcatWhenEmpty {
     }
 
     override def onPull(ctx: Context[T]) = {
-      if (ctx.isFinishing) {
+      if (ctx.isFinishing && empty) {
         if (pushed) {
           ctx.finish()
         } else {

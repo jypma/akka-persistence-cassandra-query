@@ -30,6 +30,7 @@ import akka.stream.scaladsl.Sink
 import akka.stream.scaladsl.Keep
 import scala.concurrent.Future
 import akka.persistence.cassandra.streams.Reaper
+import akka.stream.OverflowStrategy
 
 /**
  * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
@@ -60,15 +61,15 @@ class CassandraReadJournal(
       s"${journalConfig.keyspace}.${journalConfig.timeIndexTable}",
       journalConfig.targetPartitionSize)
 
-  private val (realtimeActor, realtimeIndex) =
-    Source.actorPublisher[IndexEntry](Props(new IndexEntryPoller(cassandraOps)))
-          .toMat(Sink.fanoutPublisher(16, 256))(Keep.both)
-          .run()
+  private val realtimeActor = system.actorOf(Props(new IndexEntryPoller(cassandraOps)))
+  private val realtimeIndex = Source.actorRef(16, OverflowStrategy.fail).mapMaterializedValue { actor =>
+    realtimeActor.tell(IndexEntryPoller.Subscribe, actor)
+  }.log("realtimeIndex")
 
   /**
    * Manages the pool of sources that emit real-time events for a given persistenceId.
    */
-  private val realtimeEvents = SourcePool(16, 256) { persistenceId: String =>
+  private val realtimeEvents = SourcePool(PersistenceIdEventsPoller.Subscribe, 256) { persistenceId: String =>
     Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId))
   }
 
@@ -78,7 +79,7 @@ class CassandraReadJournal(
     val (sink, source) = FanoutAndMerge(byPersistenceId, getEvents)
 
     // Combine past index entries and new, real-time ones into a single logical Source
-    RealTime.source(cassandraOps.pastIndex, Source(realtimeIndex))
+    RealTime(cassandraOps.pastIndex, realtimeIndex)
 
       // Filter out duplicate persistenceIds within the same time window
       .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
@@ -102,7 +103,7 @@ class CassandraReadJournal(
    * turns to real-time.
    */
   private def getEvents(entry: IndexEntry): Source[EventEnvelope,Any] = {
-    RealTime.source(cassandraOps.readEvents(entry.persistenceId), realtimeEvents(entry.persistenceId))
+    RealTime(cassandraOps.readEvents(entry.persistenceId), realtimeEvents(entry.persistenceId))
   }
 
   /**
