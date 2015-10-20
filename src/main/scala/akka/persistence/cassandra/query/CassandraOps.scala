@@ -135,7 +135,7 @@ object CassandraOps {
   implicit val eventRowMapper: RowMapper[EventEnvelope] = { row =>
     val event = persistentFromByteBuffer(row.getBytes("message"))
     EventEnvelope(
-        offset = row.getDate("window_start").getTime,
+        offset = 0,
         persistenceId = row.getString("persistence_id"),
         sequenceNr = row.getLong("sequence_nr"),
         event = akka.util.ByteString(event.getPayload().getPayload().asReadOnlyByteBuffer()))
