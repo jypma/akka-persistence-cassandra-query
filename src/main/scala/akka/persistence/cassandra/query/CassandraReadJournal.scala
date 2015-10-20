@@ -77,7 +77,7 @@ class CassandraReadJournal(
    * Returns ALL events added to the journal that implement Timestamped, where their
    * timestamp falls into the same or later time window as [offset].
    * 
-   * The returned `EventEnvelope` items don't have their indivual `offset` member set,
+   * The returned `EventEnvelope` items don't have their `offset` member set,
    * since that would require deserializing all payloads. If you need the individual offset,
    * deserialize the payloads yourself and just access event.timestamp.
    */

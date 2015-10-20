@@ -14,6 +14,8 @@ import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.persistence.query.EventEnvelope
 import org.scalatest.time.Seconds
 import org.scalatest.time.Span
+import akka.testkit.TestProbe
+import scala.concurrent.duration.DurationInt 
 
 class CassandraOpsSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(2, Seconds))
@@ -86,6 +88,22 @@ class CassandraOpsSpec extends WordSpec with Matchers with ScalaFutures with Sha
         val result = ops.readEvents("doc-1")(0, Long.MaxValue).runWith(toSequence).futureValue
 
         result should have size(10)
+      }
+    }
+    
+    "encountering gaps in the sequence number for read events, due to a rebalanced journal's write arriving out-of-order" should {
+      // when a journal writer gets rebalanced to a different node, writes from the new node could technically reach
+      // the query client before the original node's writes. In such a situation, the best thing to do is ignore the
+      // messages after the gap, assuming that the other write will eventually make it to the node. We're pretty much
+      // polling from all calls to .readEvents() anyways.
+      
+      "stop reading when it sees a gap" in new Fixture(
+          index = Seq(IndexEntry(20151013, Instant.ofEpochSecond(1444727657l), "doc-1", 1, 0)),
+          events = Seq(EventEnvelope(1444727657l, "doc-1", 1, 1),
+                       EventEnvelope(1444727657l, "doc-1", 3, 3))
+        ) {
+        val result = ops.readEvents("doc-1")(0, Long.MaxValue).runWith(toSequence).futureValue
+        result should be (Seq(EventEnvelope(1444727657l, "doc-1", 1, 1)))
       }
     }
   }
