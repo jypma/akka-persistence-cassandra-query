@@ -10,6 +10,8 @@ scalaVersion := "2.11.7"
 
 scalacOptions ++= "-deprecation" :: "-feature" :: "-target:jvm-1.8" :: Nil
 
+resolvers += Resolver.bintrayRepo("jypma", "maven")
+
 libraryDependencies += "org.scala-lang" % "scala-library" % scalaVersion.value
 
 libraryDependencies ++= {
