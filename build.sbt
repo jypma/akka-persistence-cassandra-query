@@ -2,7 +2,9 @@ organization := "com.tradeshift"
 
 name := "akka-persistence-cassandra-query"
 
-version := "1.0"
+version := "0.1-201210201614"
+
+licenses += ("MIT", url("http://opensource.org/licenses/MIT"))
 
 scalaVersion := "2.11.7"
 
@@ -26,9 +28,8 @@ libraryDependencies ++= {
 
 libraryDependencies += "org.iq80.leveldb" % "leveldb" % "0.7" % "test" // only to make eclipse happy, we're not using it.
 
-// source: https://github.com/jypma/akka-persistence-cassandra/tree/time_index
-// moved to /lib for now, until fork is either merged, or built to maven central under different artifact name
-// libraryDependencies += "com.github.krasserm" %% "akka-persistence-cassandra" % "0.5-SNAPSHOT"
+// source: https://github.com/jypma/akka-persistence-cassandra/tree/time_index_dev
+libraryDependencies += "com.github.krasserm" %% "akka-persistence-cassandra" % "0.5-jypma-201510201608"
 
 libraryDependencies += "com.datastax.cassandra"  % "cassandra-driver-core" % "2.1.8"
 
