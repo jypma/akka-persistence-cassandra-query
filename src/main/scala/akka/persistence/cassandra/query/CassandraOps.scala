@@ -3,20 +3,20 @@ package akka.persistence.cassandra.query
 import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.{ Calendar, TimeZone }
-import akka.actor.ActorRef
+
 import scala.collection.AbstractIterator
+import scala.concurrent.duration.{ DurationInt, FiniteDuration }
+
+import com.typesafe.scalalogging.StrictLogging
+
 import akka.persistence.cassandra.Cassandra
 import akka.persistence.cassandra.Cassandra.RowMapper
+import akka.persistence.cassandra.streams.{ Sequential, TakeWhileTupled2 }
 import akka.persistence.query.EventEnvelope
 import akka.persistence.serialization.MessageFormats
 import akka.stream.scaladsl.{ FlattenStrategy, Source }
+
 import CassandraOps._
-import akka.persistence.cassandra.streams.ConcatWhenEmpty
-import scala.concurrent.duration.DurationInt
-import scala.concurrent.duration.FiniteDuration
-import akka.stream.Attributes
-import akka.persistence.cassandra.streams.Sequential
-import com.typesafe.scalalogging.StrictLogging
 
 class CassandraOps(
   cassandra: Cassandra,
@@ -61,6 +61,7 @@ class CassandraOps(
     Sequential.forEachUntilEmpty(partitionNr(startNr))(_ + 1) { partitionNr =>
       logger.debug("Reading events of {} from partition {}", persistenceId, partitionNr.asInstanceOf[AnyRef])
       selectMessages.execute(persistenceId, partitionNr, startNr)
+                    .transform(() => TakeWhileTupled2(_.sequenceNr + 1 == _.sequenceNr))
     }
   }
 
@@ -108,10 +109,6 @@ class CassandraOps(
 object CassandraOps {
   case class SequenceNr(used: Boolean, seqNr: Long)
 
-  //case class StoredEvent(sequenceNr: Long, windowStart: Instant, msg: MessageFormats.PersistentMessage) {
-  //  override def toString = s"StoredEvent(${sequenceNr}, ${windowStart}, ...)"
-  //}
-
   case class IndexEntry(yearMonthDay: Int, window_start: Instant,
       persistenceId: String, firstSequenceNrInWindow: Long, partitionNr: Long)
 
@@ -135,7 +132,7 @@ object CassandraOps {
   implicit val eventRowMapper: RowMapper[EventEnvelope] = { row =>
     val event = persistentFromByteBuffer(row.getBytes("message"))
     EventEnvelope(
-        offset = row.getDate("window_start").getTime,
+        offset = 0,
         persistenceId = row.getString("persistence_id"),
         sequenceNr = row.getLong("sequence_nr"),
         event = akka.util.ByteString(event.getPayload().getPayload().asReadOnlyByteBuffer()))

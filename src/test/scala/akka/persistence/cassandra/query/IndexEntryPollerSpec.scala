@@ -107,14 +107,18 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
         val todaysEntry = mkIndexEntry(soon, "today")
         when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
         f.now = soon
-        f.emitted.expectMsg(todaysEntry)
+        f.emitted.within(10.seconds) {
+          f.emitted.expectMsg(todaysEntry)          
+        }
 
         val tomorrow = f.now plusSeconds 10 // now crossed the date boundary
         val tomorrowsEntry = mkIndexEntry(tomorrow, "tomorrow")
         when(f.cassandraOps.readIndexEntriesOnSameDaySince(tomorrow minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
         when(f.cassandraOps.readIndexEntriesOnSameDaySince(startOfTomorrow)).thenReturn(Source.single(tomorrowsEntry))
         f.now = tomorrow
-        f.emitted.expectMsg(tomorrowsEntry)
+        f.emitted.within(10.seconds) {
+          f.emitted.expectMsg(tomorrowsEntry)
+        }
       }
     }
   }

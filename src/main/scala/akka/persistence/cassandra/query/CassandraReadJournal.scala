@@ -73,6 +73,14 @@ class CassandraReadJournal(
     Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId))
   }
 
+  /**
+   * Returns ALL events added to the journal that implement Timestamped, where their
+   * timestamp falls into the same or later time window as [offset].
+   * 
+   * The returned `EventEnvelope` items don't have their `offset` member set,
+   * since that would require deserializing all payloads. If you need the individual offset,
+   * deserialize the payloads yourself and just access event.timestamp.
+   */
   override def eventsByTag(tag: String, offset: Long): Source[EventEnvelope, Unit] = {
     //FIXME uhm we should be using offset somewhere???
 

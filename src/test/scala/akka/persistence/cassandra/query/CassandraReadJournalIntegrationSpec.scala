@@ -48,10 +48,11 @@ object CassandraReadJournalIntegrationSpec {
       |cassandra-journal.max-result-size = 3
       |cassandra-journal.port = 9142
       |cassandra-journal.timeWindowLength = 10s
-      |cassandra-journal.indexed-persistence-id-prefixes = ["document"]
       |cassandra-snapshot-store.port = 9142
     """.stripMargin)
 
+  case class Event(content: String, timestamp: Instant = Instant.now) extends Timestamped
+    
   class DocumentActor(probe: ActorRef) extends PersistentActor {
     override def persistenceId = context.self.path.name
 
@@ -59,11 +60,11 @@ object CassandraReadJournalIntegrationSpec {
 
     override def receiveCommand: Receive = {
       case payload: String =>
-        persist(payload)(handle)
+        persist(Event(payload))(handle)
     }
 
     def handle: Receive = {
-      case payload: String =>
+      case Event(payload, _) =>
         probe ! payload
     }
   }
@@ -92,14 +93,14 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
 
         received.within(1.minute) {
         	val event = received.expectMsgType[EventEnvelope]
-        	event.offset should be (testStart +- 30000)
+        	// we don't validate event.offset, since setting that requires us to deserialize all events.
         	event.persistenceId should be ("document-1")
         	event.sequenceNr should be (1)
         	event.event shouldBe a[akka.util.ByteString]
 
-        	// by default, akka uses Java serialization, which has serialized our String.
-        	val content = new ObjectInputStream(new ByteArrayInputStream(event.event.asInstanceOf[akka.util.ByteString].toArray)).readObject()
-        	content should be ("change-1")
+        	// by default, akka uses Java serialization, which has serialized our Event.
+        	val content = new ObjectInputStream(event.event.asInstanceOf[akka.util.ByteString].iterator.asInputStream).readObject().asInstanceOf[Event]
+        	content.content should be ("change-1")
         }
 
         system.stop(received.ref)
