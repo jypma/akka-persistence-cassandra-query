@@ -9,6 +9,7 @@ import PersistenceIdEventsPoller._
 import akka.actor.Actor
 import akka.actor.ActorRef
 import akka.actor.Terminated
+import akka.actor.ActorLogging
 
 /**
  * Actor which publishes messages as they become visible in cassandra, for a specific persistenceId.
@@ -23,9 +24,11 @@ class PersistenceIdEventsPoller(
     // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
     // Remember this is PER concurrently accessed persistenceId.
     maximumQueueSize: Int = 100
-)(implicit m:Materializer) extends Actor {
+)(implicit m:Materializer) extends Actor with ActorLogging {
   import context.dispatcher
 
+  log.debug("Starting poller for {}", persistenceId)
+  
   assert(pollDelay.toMillis < extendedTimeWindowLength.toMillis, "poll interval should be (much) less than extended window length")
 
   val queue = collection.mutable.Queue.empty[EventEnvelope]
@@ -36,6 +39,7 @@ class PersistenceIdEventsPoller(
 
   def polling(lastSeenSeqNr: Long, lastSeenOffset: Option[Long]): Receive = {
     if (lastSeenOffset.map(Instant.ofEpochMilli).exists(_ isBefore nowFunc.minus(extendedTimeWindowLength))) {
+      log.info("Stopping, since last seen offset {} is too long ago.", lastSeenOffset)
       // last seen offset is before (now - time window length), so we stop ourselves
       context.stop(self)
       idle
@@ -47,6 +51,7 @@ class PersistenceIdEventsPoller(
   val idle: Receive = { case _ => }
 
   def poll(lastSeenSeqNr: Long, lastSeenOffset: Option[Long]): Receive = {
+    log.debug("Polling from seqnr {}, last seen offset {}", lastSeenSeqNr, lastSeenOffset)
     cassandraOps.readEvents(persistenceId)(lastSeenSeqNr + 1, Long.MaxValue).runWith(Sink.actorRef(self, CassandraDone))
     var highestSeenSeqNr = lastSeenSeqNr
     var highestSeenOffset = lastSeenOffset
@@ -69,20 +74,24 @@ class PersistenceIdEventsPoller(
           queue += event
           highestSeenSeqNr = event.sequenceNr
           highestSeenOffset = Some(event.offset)
+          log.debug("Seen event #{} at {} ({} subscribers)", event.sequenceNr, event.offset, subscriptions.size) 
           deliverQueue()
         }
 
       case CassandraDone =>
+        log.debug("Cassandra query complete.")
         context.system.scheduler.scheduleOnce(pollDelay, self, Repoll)
 
       case Repoll =>
         context become polling(highestSeenSeqNr, highestSeenOffset)
 
       case Subscribe =>
+        log.debug("Adding subscription from {}", sender)
         context.watch(sender)
         subscriptions += sender
 
       case Terminated(actor) =>
+        log.debug("Removing subscription from {}", actor)
         subscriptions -= actor
     }
   }

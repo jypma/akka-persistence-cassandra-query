@@ -67,7 +67,7 @@ class CassandraOpsSpec extends WordSpec with Matchers with ScalaFutures with Sha
       }
     }
 
-    val ops = new CassandraOps(cassandra, "messages", "metadata", "timeIndex", targetPartitionSize = partitionSize)
+    val ops = new CassandraOps(system, cassandra, "messages", "metadata", "timeIndex", targetPartitionSize = partitionSize)
   }
 
   "CassandraOps.readEvents" when {
