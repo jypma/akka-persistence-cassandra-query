@@ -17,6 +17,7 @@ import akka.persistence.PersistentRepr
 import com.datastax.driver.core.utils.Bytes
 import akka.serialization.SerializationExtension
 import akka.actor.ActorSystem
+import akka.util.ByteString
 
 class CassandraOps(
   system: ActorSystem,
@@ -30,7 +31,8 @@ class CassandraOps(
   private val serialization = SerializationExtension(system)
   
   private implicit val eventRowMapper: RowMapper[EventEnvelope] = { row =>
-    val event = persistentFromByteBuffer(row.getBytes("message"))
+    val bytes = Bytes.getArray(row.getBytes("message"))
+    val event = persistentFromByteBuffer(bytes)
     
     EventEnvelope(
         offset = event.payload match {
@@ -39,7 +41,7 @@ class CassandraOps(
         },
         persistenceId = row.getString("persistence_id"),
         sequenceNr = row.getLong("sequence_nr"),
-        event = event.payload)
+        event = EventPayload(ByteString(bytes), event.payload))
   }
   
   retryWithin(30.seconds, 1.second) {
@@ -98,8 +100,8 @@ class CassandraOps(
     selectEventsForDay.execute(day, from, to)
   }
 
-  private def persistentFromByteBuffer(b: ByteBuffer): PersistentRepr = {
-    serialization.deserialize(Bytes.getArray(b), classOf[PersistentRepr]).get
+  private def persistentFromByteBuffer(bytes: Array[Byte]): PersistentRepr = {
+    serialization.deserialize(bytes, classOf[PersistentRepr]).get
   }  
 
   private def highestDeletedSequenceNumber(persistenceId: String): Long = {

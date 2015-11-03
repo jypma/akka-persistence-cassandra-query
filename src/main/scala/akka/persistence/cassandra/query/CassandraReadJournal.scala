@@ -78,7 +78,7 @@ class CassandraReadJournal(
    * timestamp falls into the same or later time window as [offset].
    * 
    * The returned `EventEnvelope` items have their `offset` set to the event's timestamp,
-   * and `payload` set to the deserialized event instance.
+   * and `payload` set to an instance of {@link EventPayload}
    */
   override def eventsByTag(tag: String, offset: Long): Source[EventEnvelope, Unit] = {
     //FIXME uhm we should be using offset somewhere???

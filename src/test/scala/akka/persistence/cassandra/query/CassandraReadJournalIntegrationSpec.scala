@@ -98,11 +98,11 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         	// we don't validate event.offset, since setting that requires us to deserialize all events.
         	envelope.persistenceId should be ("document-1")
         	envelope.sequenceNr should be (1)
-        	envelope.event shouldBe an[Event]
+        	envelope.event shouldBe an[EventPayload[_]]
 
-        	// by default, akka uses Java serialization, which has serialized our Event.
-        	val content = envelope.event.asInstanceOf[Event]
-        	content.content should be ("change-1")
+        	val content = envelope.event.asInstanceOf[EventPayload[Event]]
+        	content.serialized should not have size(0)
+        	content.deserialized.content should be ("change-1")
         }
 
         system.stop(received.ref)
