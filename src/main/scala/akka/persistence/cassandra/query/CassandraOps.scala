@@ -18,6 +18,7 @@ import com.datastax.driver.core.utils.Bytes
 import akka.serialization.SerializationExtension
 import akka.actor.ActorSystem
 import akka.util.ByteString
+import akka.persistence.serialization.MessageFormats.PersistentPayload
 
 class CassandraOps(
   system: ActorSystem,
@@ -31,19 +32,33 @@ class CassandraOps(
   private val serialization = SerializationExtension(system)
   
   private implicit val eventRowMapper: RowMapper[EventEnvelope] = { row =>
-    val bytes = Bytes.getArray(row.getBytes("message"))
-    val event = persistentFromByteBuffer(bytes)
+    val pMsg = persistentFromByteBuffer(row.getBytes("message"))
+    val payload = deserialize(pMsg.getPayload())
     
     EventEnvelope(
-        offset = event.payload match {
+        offset = payload match {
           case t:Timestamped => t.getTimestamp
           case _ => 0
         },
         persistenceId = row.getString("persistence_id"),
         sequenceNr = row.getLong("sequence_nr"),
-        event = EventPayload(ByteString(bytes), event.payload))
+        event = EventPayload(ByteString(pMsg.getPayload().getPayload().asReadOnlyByteBuffer()), payload))
   }
   
+  private def persistentFromByteBuffer(b: ByteBuffer): MessageFormats.PersistentMessage =
+    MessageFormats.PersistentMessage.parseFrom(akka.protobuf.ByteString.copyFrom(b))
+
+  // from akka.persistence.serialization.MassageSerializer
+  private def deserialize(persistentPayload: PersistentPayload): Any = {
+    val manifest = if (persistentPayload.hasPayloadManifest)
+      persistentPayload.getPayloadManifest.toStringUtf8 else ""
+
+    serialization.deserialize(
+      persistentPayload.getPayload.toByteArray,
+      persistentPayload.getSerializerId,
+      manifest).get
+  }
+    
   retryWithin(30.seconds, 1.second) {
     // Once this query can run, our tables are created and ready.
     cassandra.prepareSelect(s"SELECT year_month_day FROM ${timeIndexTableName} WHERE year_month_day = 0")(r => r).execute()
@@ -99,10 +114,6 @@ class CassandraOps(
   private def entriesForDay(day: Int, from: Instant, to: Instant): Source[IndexEntry,Any] = {
     selectEventsForDay.execute(day, from, to)
   }
-
-  private def persistentFromByteBuffer(bytes: Array[Byte]): PersistentRepr = {
-    serialization.deserialize(bytes, classOf[PersistentRepr]).get
-  }  
 
   private def highestDeletedSequenceNumber(persistenceId: String): Long = {
     selectDeletedTo.executeBlocking(persistenceId).head.getOrElse(0)

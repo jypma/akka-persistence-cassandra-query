@@ -101,8 +101,10 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         	envelope.event shouldBe an[EventPayload[_]]
 
         	val content = envelope.event.asInstanceOf[EventPayload[Event]]
-        	content.serialized should not have size(0)
         	content.deserialized.content should be ("change-1")
+        	
+        	val testedDeserialized = new ObjectInputStream(content.serialized.iterator.asInputStream).readObject().asInstanceOf[Event]
+        	testedDeserialized.content should be ("change-1")
         }
 
         system.stop(received.ref)
@@ -161,20 +163,20 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         received.expectMsgType[EventEnvelope]
         Thread.sleep(6000) // poll interval + 1
         
-        send(1)
-        send(2)
+        send(3)
+        send(4)
         received.expectMsgType[EventEnvelope]
         received.expectMsgType[EventEnvelope]
         Thread.sleep(6000) // poll interval + 1
         
-        send(1)
-        send(2)
+        send(5)
+        send(6)
         received.expectMsgType[EventEnvelope]
         received.expectMsgType[EventEnvelope]
         Thread.sleep(6000) // poll interval + 1
         
-        send(1)
-        send(2)
+        send(7)
+        send(8)
         received.expectMsgType[EventEnvelope]
         received.expectMsgType[EventEnvelope]
         Thread.sleep(6000) // poll interval + 1
