@@ -3,33 +3,66 @@ package akka.persistence.cassandra.query
 import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.{ Calendar, TimeZone }
-
 import scala.collection.AbstractIterator
 import scala.concurrent.duration.{ DurationInt, FiniteDuration }
-
 import com.typesafe.scalalogging.StrictLogging
-
 import akka.persistence.cassandra.Cassandra
 import akka.persistence.cassandra.Cassandra.RowMapper
 import akka.persistence.cassandra.streams.{ Sequential, TakeWhileTupled2 }
 import akka.persistence.query.EventEnvelope
 import akka.persistence.serialization.MessageFormats
 import akka.stream.scaladsl.{ FlattenStrategy, Source }
-
 import CassandraOps._
+import akka.persistence.PersistentRepr
+import com.datastax.driver.core.utils.Bytes
+import akka.serialization.SerializationExtension
+import akka.actor.ActorSystem
+import akka.util.ByteString
+import akka.persistence.serialization.MessageFormats.PersistentPayload
 
 class CassandraOps(
+  system: ActorSystem,
   cassandra: Cassandra,
   tableName: String,
   metadataTableName: String,
   timeIndexTableName: String,
   targetPartitionSize: Int
 ) extends StrictLogging {
+  
+  private val serialization = SerializationExtension(system)
+  
+  private implicit val eventRowMapper: RowMapper[EventEnvelope] = { row =>
+    val pMsg = persistentFromByteBuffer(row.getBytes("message"))
+    val payload = deserialize(pMsg.getPayload())
+    
+    EventEnvelope(
+        offset = payload match {
+          case t:Timestamped => t.getTimestamp
+          case _ => 0
+        },
+        persistenceId = row.getString("persistence_id"),
+        sequenceNr = row.getLong("sequence_nr"),
+        event = EventPayload(ByteString(pMsg.getPayload().getPayload().asReadOnlyByteBuffer()), payload))
+  }
+  
+  private def persistentFromByteBuffer(b: ByteBuffer): MessageFormats.PersistentMessage =
+    MessageFormats.PersistentMessage.parseFrom(akka.protobuf.ByteString.copyFrom(b))
+
+  // from akka.persistence.serialization.MassageSerializer
+  private def deserialize(persistentPayload: PersistentPayload): Any = {
+    val manifest = if (persistentPayload.hasPayloadManifest)
+      persistentPayload.getPayloadManifest.toStringUtf8 else ""
+
+    serialization.deserialize(
+      persistentPayload.getPayload.toByteArray,
+      persistentPayload.getSerializerId,
+      manifest).get
+  }
+    
   retryWithin(30.seconds, 1.second) {
     // Once this query can run, our tables are created and ready.
     cassandra.prepareSelect(s"SELECT year_month_day FROM ${timeIndexTableName} WHERE year_month_day = 0")(r => r).execute()
   }
-
 
   /**
    * Queries cassandra for the given time window interval, once.
@@ -46,10 +79,6 @@ class CassandraOps(
       .named("pastIndex")
   }
 
-  private def entriesForDay(day: Int, from: Instant, to: Instant): Source[IndexEntry,Any] = {
-    selectEventsForDay.execute(day, from, to)
-  }
-
   def readIndexEntriesOnSameDaySince(start: Instant): Source[IndexEntry,Any] =
     selectEventsSince.execute(toYearMonthDay(start), start)
 
@@ -64,7 +93,7 @@ class CassandraOps(
                     .transform(() => TakeWhileTupled2(_.sequenceNr + 1 == _.sequenceNr))
     }
   }
-
+  
   def findHighestSequenceNr(persistenceId: String, fromSequenceNr: Long = 0) = {
     @annotation.tailrec
     def find(currentPnr: Long, currentSnr: Long): Long = {
@@ -80,6 +109,10 @@ class CassandraOps(
       }
     }
     find(partitionNr(fromSequenceNr), fromSequenceNr)
+  }
+
+  private def entriesForDay(day: Int, from: Instant, to: Instant): Source[IndexEntry,Any] = {
+    selectEventsForDay.execute(day, from, to)
   }
 
   private def highestDeletedSequenceNumber(persistenceId: String): Long = {
@@ -128,18 +161,6 @@ object CassandraOps {
       row.getLong("first_sequence_nr_in_window"),
       row.getLong("partition_nr"))
 
-
-  implicit val eventRowMapper: RowMapper[EventEnvelope] = { row =>
-    val event = persistentFromByteBuffer(row.getBytes("message"))
-    EventEnvelope(
-        offset = 0,
-        persistenceId = row.getString("persistence_id"),
-        sequenceNr = row.getLong("sequence_nr"),
-        event = akka.util.ByteString(event.getPayload().getPayload().asReadOnlyByteBuffer()))
-  }
-
-  private def persistentFromByteBuffer(b: ByteBuffer): MessageFormats.PersistentMessage =
-    MessageFormats.PersistentMessage.parseFrom(akka.protobuf.ByteString.copyFrom(b))
 
   private implicit val sequenceNrRowMapper: RowMapper[SequenceNr] = { row =>
     SequenceNr(row.getBool("used"), row.getLong("sequence_nr"))

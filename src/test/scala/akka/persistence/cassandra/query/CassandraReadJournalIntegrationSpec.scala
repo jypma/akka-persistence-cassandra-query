@@ -51,7 +51,9 @@ object CassandraReadJournalIntegrationSpec {
       |cassandra-snapshot-store.port = 9142
     """.stripMargin)
 
-  case class Event(content: String, timestamp: Instant = Instant.now) extends Timestamped
+  case class Event(content: String, timestamp: Instant = Instant.now) extends Timestamped {
+    def getTimestamp: Long = timestamp.toEpochMilli
+  }
     
   class DocumentActor(probe: ActorRef) extends PersistentActor {
     override def persistenceId = context.self.path.name
@@ -92,15 +94,17 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         journal.eventsByTag("_all", 0).runWith(Sink.actorRef(received.ref, "complete"))
 
         received.within(1.minute) {
-        	val event = received.expectMsgType[EventEnvelope]
+        	val envelope = received.expectMsgType[EventEnvelope]
         	// we don't validate event.offset, since setting that requires us to deserialize all events.
-        	event.persistenceId should be ("document-1")
-        	event.sequenceNr should be (1)
-        	event.event shouldBe a[akka.util.ByteString]
+        	envelope.persistenceId should be ("document-1")
+        	envelope.sequenceNr should be (1)
+        	envelope.event shouldBe an[EventPayload[_]]
 
-        	// by default, akka uses Java serialization, which has serialized our Event.
-        	val content = new ObjectInputStream(event.event.asInstanceOf[akka.util.ByteString].iterator.asInputStream).readObject().asInstanceOf[Event]
-        	content.content should be ("change-1")
+        	val content = envelope.event.asInstanceOf[EventPayload[Event]]
+        	content.deserialized.content should be ("change-1")
+        	
+        	val testedDeserialized = new ObjectInputStream(content.serialized.iterator.asInputStream).readObject().asInstanceOf[Event]
+        	testedDeserialized.content should be ("change-1")
         }
 
         system.stop(received.ref)
@@ -137,6 +141,48 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         system.stop(doc)
         Reaper(queries.map(_.ref) :+ doc).futureValue
         journal.shutdown().futureValue
+      }
+      
+      "pick up on changes when multiple changes are made during one time window" in {
+        val probe = TestProbe()
+        val doc = system.actorOf(Props(classOf[DocumentActor], probe.ref), "document-1")
+        val journal = CassandraReadJournal.instance
+
+        // start the event stream
+        val received = TestProbe()
+        journal.eventsByTag("_all", 0).runWith(Sink.actorRef(received.ref, "complete"))
+        
+        def send(i:Int) = { 
+          doc ! s"change-$i"
+          probe.expectMsgType[String] // we know it's persisted once it hits the probe          
+        }
+        
+        send(1)
+        send(2)
+        received.expectMsgType[EventEnvelope]
+        received.expectMsgType[EventEnvelope]
+        Thread.sleep(6000) // poll interval + 1
+        
+        send(3)
+        send(4)
+        received.expectMsgType[EventEnvelope]
+        received.expectMsgType[EventEnvelope]
+        Thread.sleep(6000) // poll interval + 1
+        
+        send(5)
+        send(6)
+        received.expectMsgType[EventEnvelope]
+        received.expectMsgType[EventEnvelope]
+        Thread.sleep(6000) // poll interval + 1
+        
+        send(7)
+        send(8)
+        received.expectMsgType[EventEnvelope]
+        received.expectMsgType[EventEnvelope]
+        Thread.sleep(6000) // poll interval + 1
+        
+        system.stop(doc)
+        journal.shutdown().futureValue        
       }
 
       /*

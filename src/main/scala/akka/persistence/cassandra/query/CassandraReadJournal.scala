@@ -55,7 +55,7 @@ class CassandraReadJournal(
 
   private val journalConfig = new CassandraJournalConfig(system.settings.config.getConfig("cassandra-journal"))
 
-  private val cassandraOps = new CassandraOps(Cassandra(system),
+  private val cassandraOps = new CassandraOps(system, Cassandra(system),
       s"${journalConfig.keyspace}.${journalConfig.table}",
       s"${journalConfig.keyspace}.${journalConfig.metadataTable}",
       s"${journalConfig.keyspace}.${journalConfig.timeIndexTable}",
@@ -77,9 +77,8 @@ class CassandraReadJournal(
    * Returns ALL events added to the journal that implement Timestamped, where their
    * timestamp falls into the same or later time window as [offset].
    * 
-   * The returned `EventEnvelope` items don't have their `offset` member set,
-   * since that would require deserializing all payloads. If you need the individual offset,
-   * deserialize the payloads yourself and just access event.timestamp.
+   * The returned `EventEnvelope` items have their `offset` set to the event's timestamp,
+   * and `payload` set to an instance of {@link EventPayload}
    */
   override def eventsByTag(tag: String, offset: Long): Source[EventEnvelope, Unit] = {
     //FIXME uhm we should be using offset somewhere???
