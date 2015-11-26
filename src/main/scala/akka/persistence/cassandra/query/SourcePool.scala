@@ -48,6 +48,7 @@ class SourcePool[T,K](factory: K => Props, subscribeMessage: Any, bufferSize: In
   private class ManagerActor extends Actor {
     val running = collection.mutable.Map.empty[K,ActorRef]
     val keyForActor = collection.mutable.Map.empty[ActorRef,K]
+    val subscribers = collection.mutable.Map.empty[ActorRef,Set[ActorRef]].withDefaultValue(Set.empty)
 
     def receive = {
       case AddSubscription(key) =>
@@ -58,8 +59,10 @@ class SourcePool[T,K](factory: K => Props, subscribeMessage: Any, bufferSize: In
           actor
         })
         worker.tell(subscribeMessage, sender)
+        subscribers(worker) += sender
 
       case Terminated(actor) =>
+        subscribers(actor).foreach(context.stop)
         running.remove(keyForActor(actor))
     }
   }

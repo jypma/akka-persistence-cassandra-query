@@ -32,6 +32,7 @@ import scala.concurrent.Future
 import akka.persistence.cassandra.streams.Reaper
 import akka.stream.OverflowStrategy
 import com.typesafe.scalalogging.StrictLogging
+import scala.concurrent.duration.DurationInt
 
 /**
  * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
@@ -63,6 +64,7 @@ class CassandraReadJournal(
       journalConfig.targetPartitionSize)
 
   val extendedTimeWindowLength = config.getDuration("extendedTimeWindowLength")
+  val allowedClockDrift = config.getDuration("allowedClockDrift")
   
   private val realtimeActor = system.actorOf(Props(new IndexEntryPoller(cassandraOps, extendedTimeWindowLength)))
   private val realtimeIndex = Source.actorRef(16, OverflowStrategy.fail).mapMaterializedValue { actor =>
@@ -118,13 +120,18 @@ class CassandraReadJournal(
    * just complete after returning all the events.
    */
   private def getEvents(entry: IndexEntry): Source[EventEnvelope,Any] = {
-    //TODO optimize to only read from cassandra, and once, if time window is closed.
+    val remaining = entry.remainingTimeAt(now.minus(allowedClockDrift))
     
-    RealTime(
-      cassandraOps.readEvents(entry.persistenceId), 
-      realtimeEvents(entry.persistenceId), 
-      entry.firstSequenceNrInWindow
-    )
+    if (remaining.isDefined) {
+      RealTime(
+        cassandraOps.readEvents(entry.persistenceId), 
+        realtimeEvents(entry.persistenceId), 
+        entry.firstSequenceNrInWindow
+      )
+      .takeWithin(remaining.get)
+    } else {
+      cassandraOps.readEvents(entry.persistenceId)(entry.firstSequenceNrInWindow, eventChronology.endOfTime)
+    }
     .takeWhile(entry.isEventInTimeWindow(_))
   }
 

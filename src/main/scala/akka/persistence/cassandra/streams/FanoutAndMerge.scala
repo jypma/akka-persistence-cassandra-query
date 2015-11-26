@@ -168,7 +168,7 @@ object FanoutAndMerge {
         
       case OnError(cause: Throwable) =>
         // FIXME: We need to signal upstream that this was an error, rather than end-of-stream
-        log.error("Oh, no, our stream has errored. Stopping.", cause)
+        log.warning("Oh, no, our stream has errored. Stopping. {}", cause.toString())
         context.stop(self)
     }
   }
@@ -186,6 +186,10 @@ object FanoutAndMerge {
 	  val queue = collection.mutable.Queue.empty[In]
 	  var completed: Boolean = false
 
+	  case object LogQueue
+	  import context.dispatcher
+	  val debugTimer = context.system.scheduler.schedule(200.milliseconds, 200.milliseconds, self, LogQueue)
+	  
 	  out ! Register(self)
 
     // TODO We keep this maximum number of open sub-streams or queued items, before blocking upstream. Make this configurable.
@@ -194,6 +198,11 @@ object FanoutAndMerge {
     }
 
     def receive = {
+      case LogQueue =>
+        if (!queue.isEmpty) {
+          log.debug("{}: Queue {}, watching {}", self.path.name, queue.size, inProgress.map(_.path.name))
+        }
+      
       case OnNext(elem) =>
         val in = elem.asInstanceOf[In]
         val key = getKey(in)
@@ -201,12 +210,14 @@ object FanoutAndMerge {
           // OK to start this substream
           startStream(in)
         } else {
+          log.debug("{}: Queueing {}", self.path.name, in) 
           // queue the element and wait for current substreams to complete
           queue.enqueue(in)
         }
 
       case Terminated(actor) =>
         inProgress -= actor
+        log.debug("{}: Terminated {}. {} in progress. {} queued.", self.path.name, actor.path.name, inProgress.size, queue.size)
         stopOrSendQueue()
 
       case OnComplete =>
@@ -215,13 +226,14 @@ object FanoutAndMerge {
         
       case OnError(cause: Throwable) =>
         // FIXME: We need to signal upstream that this was an error, rather than end-of-stream
-        log.error("Oh, no, our stream has errored. Stopping.", cause)
+        log.warning("Oh, no, our stream has errored. Stopping. {}", cause.toString())
         context.stop(self)
     }
 
     def startStream(in: In) {
       currentKey = Some(getKey(in))
       val actor = getSource(in).runWith(mergeIn)
+      log.debug("{}: Started {} for {}", self.path.name, actor.path.name, currentKey.get)
       context.watch(actor)
       inProgress += actor      
     }

@@ -1,22 +1,22 @@
 package akka.persistence.cassandra.query
 
 import java.time.{ Duration, Instant }
-
 import scala.concurrent.duration.DurationInt
-
 import org.mockito.Mockito.{ atLeastOnce, mock, verify, when }
 import org.scalatest.{ Finders, Matchers, WordSpec }
 import org.scalatest.concurrent.{ Eventually, ScalaFutures }
 import org.scalatest.time.{ Seconds, Span }
-
 import akka.actor.Props
 import akka.persistence.cassandra.query.CassandraOps.IndexEntry
 import akka.persistence.cassandra.test.SharedActorSystem
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.testkit.TestProbe
+import akka.cluster.pubsub.DistributedPubSub
+import akka.cluster.pubsub.DistributedPubSubMediator.Publish
 
 class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
+  val pubsub = DistributedPubSub(system).mediator
 
   "IndexEntryPoller" when {
 
@@ -41,7 +41,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
     	when(cassandraOps.readIndexEntriesOnSameDaySince(initialTime minus extTimeWindow)).thenReturn(Source(initialContent.toList))
 
     	val poller = system.actorOf(Props(
-			  new IndexEntryPoller(cassandraOps, pollDelay = 1.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)))
+			  new IndexEntryPoller(cassandraOps, pollDelay = 200.milliseconds, nowFunc = now, extendedTimeWindowLength = extTimeWindow)))
 			emitted.send(poller, IndexEntryPoller.Subscribe)
 
 	    // Allow the publisher to pick up the initialContent (which it'll do shortly after having queried for initialTime)
@@ -84,6 +84,17 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
         f.now = soon
         f.emitted.expectMsg(entry)
       }
+      
+      "emit the newly found entries immediately after seeing a pubsub event" in fixture() { f =>
+        val soon = f.now plusMillis 50
+        val entry = mkIndexEntry(soon, "foo")
+        when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source.single(entry))
+        f.now = soon
+        pubsub ! Publish("persistenceIndex", "added:XXX")
+        f.emitted.within(100.milliseconds) {
+          f.emitted.expectMsg(entry)          
+        }
+      }
     }
 
     "discovering new entries having started with a non-empty database" should {
@@ -95,6 +106,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
         when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source(f.initialContent.toList :+ entry))
 
         f.now = soon
+        pubsub ! Publish("persistenceIndex", "added:XXX")
         f.emitted.expectMsg(entry)
       }
     }
@@ -107,6 +119,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
         val todaysEntry = mkIndexEntry(soon, "today")
         when(f.cassandraOps.readIndexEntriesOnSameDaySince(soon minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
         f.now = soon
+        pubsub ! Publish("persistenceIndex", "added:XXX")
         f.emitted.within(10.seconds) {
           f.emitted.expectMsg(todaysEntry)          
         }
@@ -116,6 +129,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
         when(f.cassandraOps.readIndexEntriesOnSameDaySince(tomorrow minus f.extTimeWindow)).thenReturn(Source.single(todaysEntry))
         when(f.cassandraOps.readIndexEntriesOnSameDaySince(startOfTomorrow)).thenReturn(Source.single(tomorrowsEntry))
         f.now = tomorrow
+        pubsub ! Publish("persistenceIndex", "added:YYY")
         f.emitted.within(10.seconds) {
           f.emitted.expectMsg(tomorrowsEntry)
         }

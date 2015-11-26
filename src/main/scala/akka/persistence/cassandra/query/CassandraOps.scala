@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.{ Calendar, TimeZone }
 import scala.collection.AbstractIterator
-import scala.concurrent.duration.{ DurationInt, FiniteDuration }
+import scala.concurrent.duration.{ DurationInt, DurationLong, FiniteDuration }
 import com.typesafe.scalalogging.StrictLogging
 import akka.persistence.cassandra.Cassandra
 import akka.persistence.cassandra.Cassandra.RowMapper
@@ -148,7 +148,11 @@ object CassandraOps {
       persistenceId: String, firstSequenceNrInWindow: Long, partitionNr: Long) {
     private val offsetMin = window_start.toEpochMilli
     private val offsetMax = offsetMin + window_length
-    def isEventInTimeWindow(evt: EventEnvelope) = evt.offset >= offsetMin && evt.offset < offsetMax 
+    def isEventInTimeWindow(evt: EventEnvelope) = evt.offset >= offsetMin && evt.offset < offsetMax
+    def remainingTimeAt(time: Instant): Option[FiniteDuration] = {
+      val offset = time.toEpochMilli
+      if (offset >= offsetMax) None else Some((offsetMax - offset).milliseconds)
+    }
   }
 
   def toYearMonthDay(instant: Instant): Int = {

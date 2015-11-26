@@ -15,6 +15,7 @@
   <logger name="akka.persistence.cassandra.ResultSetActorPublisher"><level value="WARN" /></logger>
   <logger name="akka.persistence.cassandra.query.CassandraOps"><level value="WARN" /></logger>
   <logger name="akka.persistence.cassandra.streams.rt.RealTime$"><level value="WARN" /></logger>
+  <logger name="akka.persistence.cassandra.streams.FanoutAndMerge$FanoutActor"><level value="WARN" /></logger> 
   
   <root>
     <priority value="DEBUG" />

@@ -1,9 +1,8 @@
 package akka.persistence.cassandra.query
 
 import java.time.Instant
-
+import java.time.Duration
 import scala.concurrent.duration.DurationInt
-
 import org.mockito.Matchers.{ anyLong, eq => is }
 import org.mockito.Mockito.{ atLeastOnce, mock, verify, when }
 import org.mockito.invocation.InvocationOnMock
@@ -11,15 +10,17 @@ import org.mockito.stubbing.Answer
 import org.scalatest.{ Finders, Matchers, WordSpec }
 import org.scalatest.concurrent.{ Eventually, ScalaFutures }
 import org.scalatest.time.{ Seconds, Span }
-
 import akka.actor.Props
 import akka.persistence.cassandra.test.SharedActorSystem
 import akka.persistence.query.EventEnvelope
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.testkit.TestProbe
+import akka.cluster.pubsub.DistributedPubSub
+import akka.cluster.pubsub.DistributedPubSubMediator.Publish
 
 class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
+  val pubsub = DistributedPubSub(system).mediator
 
   "PersistenceIdEventsPoller" when {
     val startTime: Instant = Instant.ofEpochSecond(1444053395)
@@ -41,7 +42,7 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
 
       val emitted = TestProbe()
       val poller = system.actorOf(Props(
-        new PersistenceIdEventsPoller(cassandraOps, "doc1", pollDelay = 1.milliseconds, nowFunc = now)))
+        new PersistenceIdEventsPoller(cassandraOps, "doc1", Duration.ofSeconds(120), pollDelay = 200.milliseconds, nowFunc = now)))
       emitted.send(poller, PersistenceIdEventsPoller.Subscribe)
 
       // Allow the publisher to pick up the initialEvents (which it'll do shortly after having queried for initialTime)
@@ -70,6 +71,15 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
         f.emitted.expectMsg(event)
         f.emitted.expectNoMsg(50.milliseconds)
       }
+      
+      "emit any new events that appear in the db immediately if pubsub publishes an event" in fixture() { f =>
+        val event = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello")
+        f.events :+= event
+        pubsub ! Publish("persistenceId:doc1", "added:1")
+        f.emitted.within(100.milliseconds) {
+          f.emitted.expectMsg(event)
+        }
+      }      
     }
 
     "starting with some stored events for its persistence id" should {
@@ -82,6 +92,7 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
       "emit any new events that appear in the db" in fixture(initialEvents) { f =>
         val event = EventEnvelope(startTime.toEpochMilli, "doc1", 2, "hello")
         f.events :+= event
+        pubsub ! Publish("persistenceId:doc1", "added:2")
         f.emitted.expectMsg(event)
       }
     }
@@ -92,9 +103,10 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
 
         val event = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello")
         f.events :+= event
+        pubsub ! Publish("persistenceId:doc1", "added:1")
         f.emitted.expectMsg(event)
         f.now = f.now plusMillis 300000
-        f.emitted.expectTerminated(f.poller, 1.second)
+        f.emitted.expectTerminated(f.poller, 2.seconds)
       }
     }
   }

@@ -44,6 +44,7 @@ object CassandraReadJournalIntegrationSpec {
       |akka.persistence.publish-confirmations = on
       |akka.persistence.publish-plugin-commands = on
       |akka.test.single-expect-default = 10s
+      |akka.persistence.query.journal.cassandra.allowedClockDrift = 1s
       |cassandra-journal.max-partition-size = 5
       |cassandra-journal.max-result-size = 3
       |cassandra-journal.port = 9142
@@ -147,6 +148,7 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
           val q = queries(i)
           q.within(1.minute) {
             for (j <- 0 to messageCount) {
+              //println(s"*** Waiting for query $i, message $j") 
             	q.expectMsgType[EventEnvelope]
             }
           }
