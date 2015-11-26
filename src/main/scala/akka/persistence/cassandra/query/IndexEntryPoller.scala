@@ -20,7 +20,7 @@ class IndexEntryPoller(
     cassandraOps: CassandraOps,
 
     // longest time window ever stored + allowed clock drift
-    extendedTimeWindowLength:Duration = Duration.ofSeconds(120),
+    extendedTimeWindowLength:Duration,
 
     pollDelay:FiniteDuration = 5.seconds,
 
@@ -89,7 +89,7 @@ class IndexEntryPoller(
   def entriesToRemember(threshold: Instant, candidates: TreeSet[IndexEntry]): Set[IndexEntry] = {
     candidates.from(IndexEntry(window_start = threshold, persistenceId = "",
         // the subsequent fields are not used for sorting, but are required to instantiate an IndexEntry
-        yearMonthDay = 0, firstSequenceNrInWindow = 0, partitionNr = 0))
+        window_length = 0, yearMonthDay = 0, firstSequenceNrInWindow = 0, partitionNr = 0))
   }
 
   /**

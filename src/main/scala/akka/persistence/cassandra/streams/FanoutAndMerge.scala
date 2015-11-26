@@ -20,7 +20,20 @@ import akka.actor.Terminated
 import akka.actor.ActorSystem
 import akka.actor.Stash
 import akka.actor.Actor
+import scala.concurrent.duration.DurationInt
+import akka.stream.actor.ActorSubscriberMessage.OnError
 
+/**
+ * Fans out input elements to nested streams using a provided function. In addition, it preserves
+ * some ordering for chunks of input elements that have the same "key".
+ * 
+ * During the same key, it will allow all nested sources to arbitrarily contribute
+ * elements to downstream. As soon as an input element arrives that yields a new key, that input element
+ * will be blocked until all current nested sources complete, after which the stream resumes
+ * with the new key.
+ * 
+ * Consider replacing this with https://github.com/akka/akka/pull/19006 once merged.
+ */
 object FanoutAndMerge {
   def apply[In,Key,Out](getKey: In => Key, getSource: In => Source[Out,Any])(implicit system:ActorSystem, m:Materializer): (Sink[In,Unit], Source[Out,Unit]) = {
     val mergeOutProxy = system.actorOf(Props(classOf[MergeOutProxy]))
@@ -31,6 +44,15 @@ object FanoutAndMerge {
 
     (Sink.actorSubscriber(Props(new FanoutActor(getKey,getSource,mergeOutProxy))).named("fanout").mapMaterializedValue { x => }, mergeOut.named("merge"))
   }
+  /* Internals:
+                             ~~~>   getSource(T)      ------>
+                             ~~~>        |            ------>
+                             ~~~>        v            ------>
+  [sink] -----> FanoutActor  ~~~>    MergeInActor     ------>    MergeOutProxy  ---->   MergeOutActor  --> [source]   
+                   |         ~~~>  (ActorSubscriber)  ------>         ^               (ActorPublisher)
+                   |                                                  |
+                   `--------------------------Register----------------'  
+   */ 
 
   /**
    * Sent from MergeOutActor to MergeInActor whenever [count] messages have been passed along downstream.
@@ -120,12 +142,6 @@ object FanoutAndMerge {
     }
   }
 
-  /**
-   * Sent from instances of MergeInActor to the owning FanoutActor to indicate that the nested stream has
-   * ended. This allows FanoutActor to still only keep 1 concurrent nested stream open per key.
-   */
-  case object RequestDeath
-
   class MergeInActor(owner: ActorRef, outActor: ActorRef) extends ActorSubscriber with ActorLogging {
     var inFlight:Int = 0
 
@@ -148,7 +164,12 @@ object FanoutAndMerge {
         }
 
       case OnComplete =>
-        owner ! RequestDeath
+        context.stop(self)
+        
+      case OnError(cause: Throwable) =>
+        // FIXME: We need to signal upstream that this was an error, rather than end-of-stream
+        log.error("Oh, no, our stream has errored. Stopping.", cause)
+        context.stop(self)
     }
   }
 
@@ -156,49 +177,70 @@ object FanoutAndMerge {
       getKey: In => Key,
       getSource: In => Source[Out,Any],
       out: ActorRef)
-      (implicit m:Materializer) extends ActorSubscriber {
+      (implicit m:Materializer) extends ActorSubscriber with ActorLogging {
 
 	  val mergeIn = Sink.actorSubscriber(Props(classOf[MergeInActor], self, out)).named("mergeIn")
 
-    val inProgress = collection.mutable.Set.empty[Key]
-	  val keyForActor = collection.mutable.Map.empty[ActorRef,Key]
-
+    var currentKey: Option[Key] = None
+	  val inProgress = collection.mutable.Set.empty[ActorRef]
+	  val queue = collection.mutable.Queue.empty[In]
 	  var completed: Boolean = false
 
 	  out ! Register(self)
 
-    // TODO We keep this maximum number of open sub-streams, before blocking upstream. Make this configurable.
-    override def requestStrategy = new MaxInFlightRequestStrategy(1000) {
-      override def inFlightInternally = inProgress.size
+    // TODO We keep this maximum number of open sub-streams or queued items, before blocking upstream. Make this configurable.
+    override def requestStrategy = new MaxInFlightRequestStrategy(100) {
+      override def inFlightInternally = inProgress.size + queue.size
     }
 
     def receive = {
       case OnNext(elem) =>
         val in = elem.asInstanceOf[In]
         val key = getKey(in)
-        if (inProgress.add(key)) {
-          val actor = getSource(in).runWith(mergeIn)
-          context.watch(actor)
-          keyForActor(actor) = key
+        if (currentKey.isEmpty || (currentKey.get == key)) {
+          // OK to start this substream
+          startStream(in)
+        } else {
+          // queue the element and wait for current substreams to complete
+          queue.enqueue(in)
         }
 
-      case RequestDeath =>
-        keyForActor.get(sender).foreach(inProgress.remove)
-        keyForActor.remove(sender)
-        context.stop(sender)
-        stopIfDone()
-
       case Terminated(actor) =>
-        stopIfDone()
+        inProgress -= actor
+        stopOrSendQueue()
 
       case OnComplete =>
         completed = true
-        stopIfDone()
+        stopOrSendQueue()
+        
+      case OnError(cause: Throwable) =>
+        // FIXME: We need to signal upstream that this was an error, rather than end-of-stream
+        log.error("Oh, no, our stream has errored. Stopping.", cause)
+        context.stop(self)
     }
 
-    def stopIfDone() {
-      if (keyForActor.isEmpty && completed) {
-        context.stop(self)
+    def startStream(in: In) {
+      currentKey = Some(getKey(in))
+      val actor = getSource(in).runWith(mergeIn)
+      context.watch(actor)
+      inProgress += actor      
+    }
+    
+    def stopOrSendQueue() {
+      if (inProgress.isEmpty) {
+        currentKey = None
+        
+        if (!queue.isEmpty) {
+          // Nothing in progress, so start reading from queue for next key.
+          // The queue will never have more than MaxInflight items, because of our requestStrategy.
+          // Hence, we can just start all sub-streams as long as they have the same key.
+          startStream(queue.dequeue())
+          while (queue.headOption.filter(in => getKey(in) == currentKey.get).isDefined) {
+            startStream(queue.dequeue())
+          }
+        } else if (completed) {
+          context.stop(self)          
+        }
       }
     }
   }

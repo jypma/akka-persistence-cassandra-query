@@ -1,20 +1,21 @@
 package akka.persistence.cassandra.streams.rt
 
 import scala.collection.SortedMap
-
 import org.scalatest.{ Matchers, WordSpec }
 import org.scalatest.concurrent.ScalaFutures
-
 import akka.persistence.cassandra.test.SharedActorSystem
 import akka.stream.OverflowStrategy
 import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.stream.stage.{ Context, PushStage }
 import akka.testkit.TestProbe
 import scala.concurrent.duration.DurationInt
+import scala.collection.immutable.SortedSet
 
 class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
 
-  case class Event(time: Long, contents: String)
+  case class Event(time: Long, contents: String) extends Ordered[Event] {
+    def compare(that: Event) = time.compare(that.time)
+  }
 
   def deduplicate[T] = new PushStage[T,T] {
     var last:Option[T] = None
@@ -31,14 +32,14 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
   }
 
   "RealTime.source" when {
-    class Fixture(initialEvents: SortedMap[Long,Event] = SortedMap.empty, initialTime:Long = 0) {
+    class Fixture(initialEvents: SortedSet[Event], initialTime:Long, offset:Long) {
       self =>
       var now: Long = initialTime
-      var pastEvents: SortedMap[Long,Event] = initialEvents
+      var pastEvents: SortedSet[Event] = initialEvents
 
       def emit(contents: String): Event = {
         val event = Event(now, contents)
-        pastEvents = pastEvents + (event.time -> event)
+        pastEvents += event
         realtimeActor ! event
         event
       }
@@ -52,12 +53,12 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
 
       // "realtimeActor" is the actor to which we can send simulated actions that occur in real-time
       val (realtimeActor, realtimePublisher) = Source.actorRef[Event](10, OverflowStrategy.fail).toMat(Sink.publisher)(Keep.both).run()
-      def getPast(from: Long, to: Long) = Source(pastEvents.from(from).to(to).values.toList)
+      def getPast(from: Long, to: Long) = Source(pastEvents.from(Event(from,"")).to(Event(to,"")).toList)
 
       val receiver = TestProbe("receiver")
       // "realtimeSourceActor" is the actor representing the RealTime instance under test, which is merging
       // the "realtimeActor" above which invocations the getPast() method.
-      val realtimeSourceActor = RealTime(getPast, Source(realtimePublisher), 10.milliseconds).toMat(Sink.actorRef(receiver.ref, "complete"))(Keep.left).run()
+      val realtimeSourceActor = RealTime(getPast, Source(realtimePublisher), offset, 10.milliseconds).toMat(Sink.actorRef(receiver.ref, "complete"))(Keep.left).run()
 
       def cleanup() {
         system.stop(realtimeActor)
@@ -65,8 +66,8 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
       }
     }
 
-    def fixture(initialEvents: SortedMap[Long,Event] = SortedMap.empty, initialTime:Long = 0)(testcode: Fixture => Any) = {
-      val f = new Fixture(initialEvents, initialTime)
+    def fixture(initialEvents: SortedSet[Event] = SortedSet.empty, initialTime:Long = 0, offset:Long = 0)(testcode: Fixture => Any) = {
+      val f = new Fixture(initialEvents, initialTime, offset)
       try testcode(f) finally f.cleanup()
     }
 
@@ -82,7 +83,7 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
 
     "reading from history while real-time events come in with later timestamps" should {
       "ignore the real-time events until it has seen a historic event and a real-time event with the same timestamp" in fixture (
-        initialEvents = SortedMap((1l -> Event(1, "hello")), (2l -> Event(2, "world"))),
+        initialEvents = SortedSet(Event(1, "hello"), Event(2, "world")),
         initialTime = 3
       ){ f =>
         f.realtimeActor ! Event(3, "should be ignored since no past event with timestamp 3 was seen yet")
@@ -112,6 +113,19 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
         f.receiver.expectMsg(f.emit("hello"))
         system.stop(f.realtimeActor)
         f.receiver.expectMsg("complete")
+      }
+    }
+    
+    "reading from history from a given offset" should {
+      "return events from and including the offset" in fixture (
+        initialEvents = SortedSet(
+          Event(1, "hello"), 
+          Event(2, "world")
+        ),
+        initialTime = 3,
+        offset = 2
+      ){ f =>
+        f.receiver.expectMsg(Event(2, "world"))
       }
     }
   }

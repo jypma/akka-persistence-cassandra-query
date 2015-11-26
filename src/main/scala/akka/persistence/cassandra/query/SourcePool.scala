@@ -52,7 +52,7 @@ class SourcePool[T,K](factory: K => Props, subscribeMessage: Any, bufferSize: In
     def receive = {
       case AddSubscription(key) =>
         val worker = running.getOrElseUpdate(key, {
-          val actor = context.actorOf(factory(key), key.toString)
+          val actor = context.actorOf(factory(key))
           context.watch(actor)
           keyForActor(actor) = key
           actor

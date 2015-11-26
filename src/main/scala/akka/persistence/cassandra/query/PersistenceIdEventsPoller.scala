@@ -18,7 +18,7 @@ class PersistenceIdEventsPoller(
     cassandraOps: CassandraOps,
     persistenceId: String,
     // longest time window ever stored + allowed clock drift
-    extendedTimeWindowLength:Duration = Duration.ofSeconds(120),
+    extendedTimeWindowLength:Duration,
     pollDelay: FiniteDuration = 5.seconds,
     nowFunc: => Instant = Instant.now,
     // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.

@@ -25,7 +25,7 @@ class IndexEntryPollerSpec extends WordSpec with Matchers with ScalaFutures with
     val      startOfTomorrow = Instant.ofEpochSecond(1420156800) // Thu, 01 Jan 2015 00:00:00 GMT
 
     def mkIndexEntry(windowStart: Instant, persistenceId: String) =
-      IndexEntry(IndexEntryPoller.toYearMonthDay(windowStart), windowStart, persistenceId, 0, 0)
+      IndexEntry(IndexEntryPoller.toYearMonthDay(windowStart), windowStart, 60000, persistenceId, 0, 0)
 
     class Fixture(
       val initialContent: Set[IndexEntry] = Set.empty,
