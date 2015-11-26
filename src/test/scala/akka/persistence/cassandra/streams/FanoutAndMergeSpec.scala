@@ -9,6 +9,8 @@ import akka.stream.OverflowStrategy
 import akka.testkit.TestProbe
 import akka.stream.scaladsl.Keep
 import scala.util.Random
+import akka.actor.Status.Failure
+import scala.concurrent.Future
 
 class FanoutAndMergeSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds)) // actual run-time on 4-core machine: 1 second
@@ -82,5 +84,33 @@ class FanoutAndMergeSpec extends WordSpec with Matchers with ScalaFutures with S
       trigger ! InElem(2,"2.1")
       receiver.expectMsgType[InElem].key should be (2)
     }
+    
+    "detect when the sink's flow has errored, and forward the error to the source" in {
+      def getSource(elem: InElem) = Source.single(elem)
+      val (sink, source) = FanoutAndMerge(getKey, getSource)
+      val trigger = Source.actorRef[InElem](1, OverflowStrategy.fail).toMat(sink)(Keep.left).run()
+      val receiver = TestProbe()
+      source.runWith(Sink.actorRef(receiver.ref, "done"))
+      
+      trigger ! Failure(new RuntimeException("oh-no"))
+      val failure = receiver.expectMsgType[Failure]
+      failure.cause shouldBe a[RuntimeException]
+      failure.cause.getMessage should be("oh-no")
+    }
+    
+    "detect when one of the substream flows has errored, and forward the error to the source" in {
+      import system.dispatcher
+      def getSource(elem: InElem) = Source(Future { throw new RuntimeException("oh-no") })
+      val (sink, source) = FanoutAndMerge(getKey, getSource)
+      val trigger = Source.actorRef[InElem](1, OverflowStrategy.fail).toMat(sink)(Keep.left).run()
+      val receiver = TestProbe()
+      source.runWith(Sink.actorRef(receiver.ref, "done"))
+      
+      trigger ! InElem(1,"1")
+      val failure = receiver.expectMsgType[Failure]
+      failure.cause shouldBe a[RuntimeException]
+      failure.cause.getMessage should be("oh-no")      
+    }
+    
   }
 }

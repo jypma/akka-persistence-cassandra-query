@@ -10,6 +10,8 @@ import akka.stream.stage.{ Context, PushStage }
 import akka.testkit.TestProbe
 import scala.concurrent.duration.DurationInt
 import scala.collection.immutable.SortedSet
+import scala.concurrent.Future
+import akka.actor.Status.Failure
 
 class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
 
@@ -32,7 +34,7 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
   }
 
   "RealTime.source" when {
-    class Fixture(initialEvents: SortedSet[Event], initialTime:Long, offset:Long) {
+    class Fixture(initialEvents: SortedSet[Event] = SortedSet.empty, initialTime:Long = 0, offset:Long = 0) {
       self =>
       var now: Long = initialTime
       var pastEvents: SortedSet[Event] = initialEvents
@@ -69,6 +71,10 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
     def fixture(initialEvents: SortedSet[Event] = SortedSet.empty, initialTime:Long = 0, offset:Long = 0)(testcode: Fixture => Any) = {
       val f = new Fixture(initialEvents, initialTime, offset)
       try testcode(f) finally f.cleanup()
+    }
+    
+    def withFixture[F <: Fixture](f: F)(testcode: F => Any): Unit = {
+      try testcode(f) finally f.cleanup()      
     }
 
     "reading from an empty history" should {
@@ -126,6 +132,44 @@ class RealTimeSpec extends WordSpec with Matchers with ScalaFutures with SharedA
         offset = 2
       ){ f =>
         f.receiver.expectMsg(Event(2, "world"))
+      }
+    }
+    
+    "exposed to an error in a past source" should {
+      "forward the error and close with error itself" in withFixture (new Fixture {
+        import system.dispatcher
+        override def getPast(from: Long, to: Long) = Source(Future { throw new RuntimeException("oh-no") })
+      }) { f =>
+        val failure = f.receiver.expectMsgType[Failure]
+        failure.cause shouldBe a[RuntimeException]
+        failure.cause.getMessage should be("oh-no")
+      }
+    }
+    
+    "exposed to an error in the realtime source, while still reading from a past source" should {
+      "forward the error and close with error itself" in withFixture (new Fixture {
+        import system.dispatcher
+        override def getPast(from: Long, to: Long) = Source(Future { Thread.sleep(1000); Event(1,"1") })
+      }) { f =>
+        f.realtimeActor ! Failure(new RuntimeException("oh-no"))
+        
+        val failure = f.receiver.expectMsgType[Failure]
+        failure.cause shouldBe a[RuntimeException]
+        failure.cause.getMessage should be("oh-no")
+      } 
+    }
+    
+    "exposed to an error in the realtime source, while caught up with real-time" should {
+      "forward the error and close with error itself" in fixture() { f =>
+        f.now = 1
+        f.receiver.expectMsg(f.emit("hello"))
+        
+        // caught up with real-time now.
+        f.realtimeActor ! Failure(new RuntimeException("oh-no"))
+        
+        val failure = f.receiver.expectMsgType[Failure]
+        failure.cause shouldBe a[RuntimeException]
+        failure.cause.getMessage should be("oh-no")        
       }
     }
   }

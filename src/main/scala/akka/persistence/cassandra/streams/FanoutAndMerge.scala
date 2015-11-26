@@ -22,6 +22,7 @@ import akka.actor.Stash
 import akka.actor.Actor
 import scala.concurrent.duration.DurationInt
 import akka.stream.actor.ActorSubscriberMessage.OnError
+import akka.actor.Status.Failure
 
 /**
  * Fans out input elements to nested streams using a provided function. In addition, it preserves
@@ -105,6 +106,9 @@ object FanoutAndMerge {
       case Terminated(actor) =>
         knownSenders -= actor
         stopIfDone()
+        
+      case Failure(cause) =>
+        onErrorThenStop(cause)
 
       case elem =>
         if (!knownSenders(sender)) {
@@ -167,8 +171,7 @@ object FanoutAndMerge {
         context.stop(self)
         
       case OnError(cause: Throwable) =>
-        // FIXME: We need to signal upstream that this was an error, rather than end-of-stream
-        log.warning("Oh, no, our stream has errored. Stopping. {}", cause.toString())
+        outActor ! Failure(cause)
         context.stop(self)
     }
   }
@@ -225,8 +228,7 @@ object FanoutAndMerge {
         stopOrSendQueue()
         
       case OnError(cause: Throwable) =>
-        // FIXME: We need to signal upstream that this was an error, rather than end-of-stream
-        log.warning("Oh, no, our stream has errored. Stopping. {}", cause.toString())
+        out ! Failure(cause)
         context.stop(self)
     }
 
