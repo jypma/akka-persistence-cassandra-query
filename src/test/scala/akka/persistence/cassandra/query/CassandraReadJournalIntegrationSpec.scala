@@ -235,8 +235,8 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         Thread.sleep(1000) // time window is 1 second
         send(3)
         Thread.sleep(1000) // time window is 1 second
-        send(4)
         val offset = System.currentTimeMillis()
+        send(4)
         
         Thread.sleep(1000) // time window is 1 second
         send(5)
