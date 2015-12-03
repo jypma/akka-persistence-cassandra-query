@@ -44,14 +44,16 @@ object CassandraReadJournalIntegrationSpec {
       |akka.persistence.publish-confirmations = on
       |akka.persistence.publish-plugin-commands = on
       |akka.test.single-expect-default = 10s
+      |akka.persistence.query.journal.cassandra.allowedClockDrift = 1s
       |cassandra-journal.max-partition-size = 5
       |cassandra-journal.max-result-size = 3
       |cassandra-journal.port = 9142
-      |cassandra-journal.timeWindowLength = 10s
+      |cassandra-journal.time-window-length = 1s
       |cassandra-snapshot-store.port = 9142
     """.stripMargin)
 
   case class Event(content: String, timestamp: Instant = Instant.now) extends Timestamped {
+    println(s"*** Created Event at ${timestamp.toEpochMilli()}") 
     def getTimestamp: Long = timestamp.toEpochMilli
   }
     
@@ -76,13 +78,35 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
   implicit val m = ActorMaterializer()
 
   "the CassandraReadJournal" when {
+    
+    class Fixture {
+      val probe = TestProbe()
+      val doc = system.actorOf(Props(classOf[DocumentActor], probe.ref))
+      val persistenceId = doc.path.name
+      val journal = CassandraReadJournal.instance
+      def shutdown() {
+        system.stop(doc)
+        Reaper(doc).futureValue
+        journal.shutdown().futureValue
+      }
+    }
+    
+    def fixture(code: Fixture => Unit) = {
+      val f = new Fixture()
+      try {
+        code(f)
+      } finally {
+        f.shutdown()
+      }
+    }
+    
     "listening on an empty database" should {
 
-      "pick up a single event and send it to a single running query" in {
+      "pick up a single event and send it to a single running query" in fixture { f =>
+        import f._
+        
         val testStart = System.currentTimeMillis()
 
-        val probe = TestProbe()
-        val doc = system.actorOf(Props(classOf[DocumentActor], probe.ref), "document-1")
         doc ! "change-1"
         probe.within(1.minute) {
           probe.expectMsg("change-1") // we know it's persisted once it hits the probe
@@ -90,13 +114,12 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
 
         val received = TestProbe()
 
-        val journal = CassandraReadJournal.instance
         journal.eventsByTag("_all", 0).runWith(Sink.actorRef(received.ref, "complete"))
 
         received.within(1.minute) {
         	val envelope = received.expectMsgType[EventEnvelope]
         	// we don't validate event.offset, since setting that requires us to deserialize all events.
-        	envelope.persistenceId should be ("document-1")
+        	envelope.persistenceId should be (persistenceId)
         	envelope.sequenceNr should be (1)
         	envelope.event shouldBe an[EventPayload[_]]
 
@@ -106,21 +129,14 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         	val testedDeserialized = new ObjectInputStream(content.serialized.iterator.asInputStream).readObject().asInstanceOf[Event]
         	testedDeserialized.content should be ("change-1")
         }
-
-        system.stop(received.ref)
-        system.stop(doc)
-        Reaper(received.ref,doc).futureValue
-        journal.shutdown().futureValue
       }
 
-      "eventually send all generated events to all clients" in {
-        val probe = TestProbe()
-        val doc = system.actorOf(Props(classOf[DocumentActor], probe.ref), "document-1")
-        val journal = CassandraReadJournal.instance
-
-        val messageCount = 100
+      "eventually send all generated events to all clients" in fixture { f =>
+        import f._ 
+  
+        val messageCount = 40
         val queries = for (i <- 0 to messageCount) yield {
-          Thread.sleep(10)
+          Thread.sleep(200)
           doc ! s"change-{i}"
           probe.expectMsgType[String] // we know it's persisted once it hits the probe
           val received = TestProbe()
@@ -130,24 +146,45 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
 
         for (i <- 0 to messageCount) {
           val q = queries(i)
-          for (j <- 0 to messageCount) {
-            q.within(1.minute) {
+          q.within(1.minute) {
+            for (j <- 0 to messageCount) {
+              //println(s"*** Waiting for query $i, message $j") 
             	q.expectMsgType[EventEnvelope]
             }
           }
         }
 
         for (i <- 0 to messageCount) system.stop(queries(i).ref)
-        system.stop(doc)
-        Reaper(queries.map(_.ref) :+ doc).futureValue
-        journal.shutdown().futureValue
+        Reaper(queries.map(_.ref)).futureValue
       }
       
-      "pick up on changes when multiple changes are made during one time window" in {
-        val probe = TestProbe()
-        val doc = system.actorOf(Props(classOf[DocumentActor], probe.ref), "document-1")
-        val journal = CassandraReadJournal.instance
+      "keep sending events to a query as time windows progress" in fixture { f =>
+        import f._ 
+  
+        val received = TestProbe()
+        journal.eventsByTag("_all", 0).runWith(Sink.actorRef(received.ref, "complete"))
+        
+        val messageCount = 30
+        for (i <- 0 to messageCount) {
+          Thread.sleep(100)
+          doc ! s"change-{i}"
+          probe.expectMsgType[String] // we know it's persisted once it hits the probe
+        }
 
+        received.within(1.minute) {
+          for (i <- 0 to messageCount) {
+            println(s"*** Waiting for message $i") 
+          	received.expectMsgType[EventEnvelope]
+          }
+        }
+
+        system.stop(received.ref)
+        Reaper(received.ref).futureValue
+      }
+      
+      "pick up on changes when multiple changes are made during one time window" in fixture { f =>
+        import f._
+        
         // start the event stream
         val received = TestProbe()
         journal.eventsByTag("_all", 0).runWith(Sink.actorRef(received.ref, "complete"))
@@ -180,18 +217,42 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
         received.expectMsgType[EventEnvelope]
         received.expectMsgType[EventEnvelope]
         Thread.sleep(6000) // poll interval + 1
-        
-        system.stop(doc)
-        journal.shutdown().futureValue        
       }
+    }
 
-      /*
-      "discover real-time events as they are added, across partition boundaries" in {
-        pending
+    "answering a query with offset" should {
+      "return only events from time windows at or after the offset" in fixture { f =>
+        import f._
+        
+        def send(i:Int) = { 
+          doc ! s"change-$i"
+          probe.expectMsgType[String] // we know it's persisted once it hits the probe          
+        }
+        
+        send(1)
+        Thread.sleep(1000) // time window is 1 second
+        send(2)
+        Thread.sleep(1000) // time window is 1 second
+        send(3)
+        Thread.sleep(1000) // time window is 1 second
+        val offset = System.currentTimeMillis()
+        send(4)
+        
+        Thread.sleep(1000) // time window is 1 second
+        send(5)
+        Thread.sleep(1000) // time window is 1 second
+        send(6)
+        Thread.sleep(1000) // time window is 1 second
+        
+        val received = TestProbe()
+        journal.eventsByTag("_all", offset).runWith(Sink.actorRef(received.ref, "complete"))
+        val first = received.expectMsgType[EventEnvelope]
+        first.sequenceNr should be (4)
+        val second = received.expectMsgType[EventEnvelope]
+        second.sequenceNr should be (first.sequenceNr + 1)
+        val third = received.expectMsgType[EventEnvelope]
+        third.sequenceNr should be (second.sequenceNr + 1)
       }
-      * /
-      */
     }
   }
-
 }

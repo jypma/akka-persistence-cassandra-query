@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.{ Calendar, TimeZone }
 import scala.collection.AbstractIterator
-import scala.concurrent.duration.{ DurationInt, FiniteDuration }
+import scala.concurrent.duration.{ DurationInt, DurationLong, FiniteDuration }
 import com.typesafe.scalalogging.StrictLogging
 import akka.persistence.cassandra.Cassandra
 import akka.persistence.cassandra.Cassandra.RowMapper
@@ -70,10 +70,12 @@ class CassandraOps(
   def pastIndex(from: Instant, to: Instant): Source[IndexEntry,Unit] = {
     logger.debug("Indexing from {} to {}", from, to)
 
-    val startDay = toYearMonthDay(from)
-    val endDay = toYearMonthDay(to)
+    val millisPerDay: Long = 1000 * 3600 * 24
+    val startDay = from.toEpochMilli() / millisPerDay
+    val endDay = to.toEpochMilli() / millisPerDay
 
-    Source(startDay.to(endDay))
+    Source(startDay.to(endDay)) 
+      .map(day => toYearMonthDay(Instant.ofEpochMilli(day * millisPerDay)))
       .map(day => entriesForDay(day, from, to))
       .flatten(FlattenStrategy.concat)
       .named("pastIndex")
@@ -136,14 +138,22 @@ class CassandraOps(
 
   private val selectMessages = cassandra.prepareSelect[EventEnvelope](
       s"SELECT * FROM ${tableName} WHERE persistence_id = ? AND partition_nr = ? AND sequence_nr >= ?",
-      fetchSize = 100)
+      fetchSize = 10)
 }
 
 object CassandraOps {
   case class SequenceNr(used: Boolean, seqNr: Long)
 
-  case class IndexEntry(yearMonthDay: Int, window_start: Instant,
-      persistenceId: String, firstSequenceNrInWindow: Long, partitionNr: Long)
+  case class IndexEntry(yearMonthDay: Int, window_start: Instant, window_length: Long,
+      persistenceId: String, firstSequenceNrInWindow: Long, partitionNr: Long) {
+    private val offsetMin = window_start.toEpochMilli
+    private val offsetMax = offsetMin + window_length
+    def isEventInTimeWindow(evt: EventEnvelope) = evt.offset >= offsetMin && evt.offset < offsetMax
+    def remainingTimeAt(time: Instant): Option[FiniteDuration] = {
+      val offset = time.toEpochMilli
+      if (offset >= offsetMax) None else Some((offsetMax - offset).milliseconds)
+    }
+  }
 
   def toYearMonthDay(instant: Instant): Int = {
 	  import Calendar._
@@ -157,6 +167,7 @@ object CassandraOps {
   implicit val indexEntryRowMapper: RowMapper[IndexEntry] = row => IndexEntry(
       row.getInt("year_month_day"),
       Instant.ofEpochMilli(row.getDate("window_start").getTime),
+      row.getLong("window_length"),
       row.getString("persistence_id"),
       row.getLong("first_sequence_nr_in_window"),
       row.getLong("partition_nr"))

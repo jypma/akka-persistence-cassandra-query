@@ -10,20 +10,28 @@ import akka.actor.Actor
 import akka.actor.ActorRef
 import akka.actor.Terminated
 import akka.actor.ActorLogging
+import akka.cluster.pubsub.DistributedPubSub
+import akka.cluster.pubsub.DistributedPubSubMediator
+import akka.actor.Cancellable
+import akka.ConfigurationException
+import akka.actor.Props
+import akka.actor.ActorSystem
+import scala.util.Try
 
 /**
  * Actor which publishes messages as they become visible in cassandra, for a specific persistenceId.
  */
-class PersistenceIdEventsPoller(
+class PersistenceIdEventsPoller private (
     cassandraOps: CassandraOps,
     persistenceId: String,
     // longest time window ever stored + allowed clock drift
-    extendedTimeWindowLength:Duration = Duration.ofSeconds(120),
+    extendedTimeWindowLength:Duration,
     pollDelay: FiniteDuration = 5.seconds,
     nowFunc: => Instant = Instant.now,
     // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
     // Remember this is PER concurrently accessed persistenceId.
-    maximumQueueSize: Int = 100
+    maximumQueueSize: Int = 100,
+    pubsub: Option[ActorRef] = None // ActorRef to use for pubsub instead of real DistributedPubSub, for testing
 )(implicit m:Materializer) extends Actor with ActorLogging {
   import context.dispatcher
 
@@ -35,7 +43,10 @@ class PersistenceIdEventsPoller(
   var subscriptions = Set.empty[ActorRef]
 
   def receive = { case _ => }
-  context become polling(cassandraOps.findHighestSequenceNr(persistenceId), None)
+  
+  pubsub.foreach(_ ! DistributedPubSubMediator.Subscribe(s"persistenceId:$persistenceId", self))
+  
+  become(polling(cassandraOps.findHighestSequenceNr(persistenceId), None))
 
   def polling(lastSeenSeqNr: Long, lastSeenOffset: Option[Long]): Receive = {
     if (lastSeenOffset.map(Instant.ofEpochMilli).exists(_ isBefore nowFunc.minus(extendedTimeWindowLength))) {
@@ -44,17 +55,18 @@ class PersistenceIdEventsPoller(
       context.stop(self)
       idle
     } else {
-      poll (lastSeenSeqNr, lastSeenOffset)
+      query(lastSeenSeqNr, lastSeenOffset)
     }
   }
 
   val idle: Receive = { case _ => }
 
-  def poll(lastSeenSeqNr: Long, lastSeenOffset: Option[Long]): Receive = {
-    log.debug("Polling from seqnr {}, last seen offset {}", lastSeenSeqNr, lastSeenOffset)
+  def query(lastSeenSeqNr: Long, lastSeenOffset: Option[Long]): Receive = {
+    log.debug("Querying from seqnr {}, last seen offset {}", lastSeenSeqNr, lastSeenOffset)
     cassandraOps.readEvents(persistenceId)(lastSeenSeqNr + 1, Long.MaxValue).runWith(Sink.actorRef(self, CassandraDone))
     var highestSeenSeqNr = lastSeenSeqNr
     var highestSeenOffset = lastSeenOffset
+    var immediateRepoll = false
 
     {
       case event:EventEnvelope =>
@@ -80,20 +92,42 @@ class PersistenceIdEventsPoller(
 
       case CassandraDone =>
         log.debug("Cassandra query complete.")
-        context.system.scheduler.scheduleOnce(pollDelay, self, Repoll)
+        if (immediateRepoll) {
+          become(polling(highestSeenSeqNr, highestSeenOffset))
+        } else {
+          val scheduledRepoll = context.system.scheduler.scheduleOnce(pollDelay, self, Repoll)
+          become(queryComplete(highestSeenSeqNr, highestSeenOffset, scheduledRepoll))          
+        }
 
-      case Repoll =>
-        context become polling(highestSeenSeqNr, highestSeenOffset)
-
-      case Subscribe =>
-        log.debug("Adding subscription from {}", sender)
-        context.watch(sender)
-        subscriptions += sender
-
-      case Terminated(actor) =>
-        log.debug("Removing subscription from {}", actor)
-        subscriptions -= actor
+      // This is the string posted to the persistenceId:XXX topic on DistributedPubSub
+      case s:String if s.startsWith("added") =>
+        immediateRepoll = true
     }
+  }
+  
+  def queryComplete(lastSeenSeqNr: Long, lastSeenOffset: Option[Long], scheduledRepoll: Cancellable): Receive = {
+    // This is the string posted to the persistenceId:XXX topic on DistributedPubSub
+    case s:String if s.startsWith("added") =>
+      scheduledRepoll.cancel()
+      become(polling(lastSeenSeqNr, lastSeenOffset))
+        
+    case Repoll =>
+      become(polling(lastSeenSeqNr, lastSeenOffset))
+  } 
+  
+  def handleSubscriptions: Receive = {
+    case Subscribe =>
+      context.watch(sender)
+      subscriptions += sender
+      log.debug("Added subscription from {}, now at {}", sender, subscriptions.size)
+
+    case Terminated(actor) =>
+      subscriptions -= actor    
+      log.debug("Removed subscription from {}, now at {}", actor, subscriptions.size)
+  }
+  
+  def become(handler: Receive): Unit = {
+    context.become(handler.orElse(handleSubscriptions))
   }
 
   def deliverQueue() {
@@ -107,6 +141,24 @@ class PersistenceIdEventsPoller(
 }
 
 object PersistenceIdEventsPoller {
+  def props(
+    cassandraOps: CassandraOps,
+    persistenceId: String,
+    // longest time window ever stored + allowed clock drift
+    extendedTimeWindowLength:Duration,
+    pollDelay: FiniteDuration = 5.seconds,
+    nowFunc: => Instant = Instant.now,
+    // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
+    // Remember this is PER concurrently accessed persistenceId.
+    maximumQueueSize: Int = 100,
+    pubsub: Option[ActorRef] = None // ActorRef to use for pubsub instead of real DistributedPubSub, for testing
+  )(implicit system:ActorSystem, m:Materializer) = {
+    val actualPubSub = pubsub orElse Try(DistributedPubSub(system).mediator).toOption 
+    
+    Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId, extendedTimeWindowLength, pollDelay,
+      nowFunc, maximumQueueSize, actualPubSub))
+  }
+      
   case object Subscribe
 
   private case object CassandraDone

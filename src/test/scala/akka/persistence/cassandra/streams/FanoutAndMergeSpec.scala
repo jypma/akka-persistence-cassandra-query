@@ -8,57 +8,109 @@ import akka.stream.scaladsl.{ Sink, Source }
 import akka.stream.OverflowStrategy
 import akka.testkit.TestProbe
 import akka.stream.scaladsl.Keep
+import scala.util.Random
+import akka.actor.Status.Failure
+import scala.concurrent.Future
 
 class FanoutAndMergeSpec extends WordSpec with Matchers with ScalaFutures with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds)) // actual run-time on 4-core machine: 1 second
+  def toSequence[T] = Sink.fold[Seq[T],T](Seq.empty)((seq, elem) => seq :+ elem)
 
   "The FanoutAndMerge operation" should {
-    case class InElem(i:Int)
-    case class OutElem(s:String)
+    case class InElem(key: Int, value: String) 
 
-    def getKey(elem: InElem) = elem.i
-    def getSource(elem: InElem) = Source(elem.i until (elem.i + 199)).concat(Source.single {
-      Thread.sleep(10) // we sleep a bit on the last element to simulate sub-streams that take a bit of time to complete.
-      elem.i + 200
-    })
+    def getKey(elem: InElem) = elem.key
 
     "eventually forward and receive all elements in all generated nested sources" in {
+      def getSource(elem: InElem) = Source(elem.key until (elem.key + 200))
+      
       val (sink, source) = FanoutAndMerge(getKey, getSource)
 
-      Source(1 to 200).map(i => InElem(i * 200)).runWith(sink)
+      Source(1 to 200).map(i => InElem(i * 200, i.toString)).runWith(sink)
       val count = source.runWith(Sink.fold(0)((i, elem) => i + 1)).futureValue
 
       count should be (40000)
     }
 
-    "only process input elements once when they yield the same key" in {
+    "process all nested sources for one key before continuing with the next key" in {
+      def getSource(elem: InElem) = Source.repeat(elem.key).map { i =>
+        Thread.sleep(Random.nextInt(5))
+        i
+      }.take(100)
       val (sink, source) = FanoutAndMerge(getKey, getSource)
-
-      Source(List(1,1,1)).map(i => InElem(i * 200)).runWith(sink)
-      val count = source.runWith(Sink.fold(0)((i, elem) => i + 1)).futureValue
-
-      count should be (200)
+      Source(List(1,1,1,1,1,1,1,1,1,1,2)).map(i => InElem(i, i.toString)).runWith(sink)
+      
+      val result = source.runWith(toSequence).futureValue
+      result should have size(11 * 100)
+      result should contain inOrderOnly(1,2)
+      result(999) should be (1)
+      result(1000) should be (2)
     }
-
-    "re-process input elements with the same key, after their nested source has completed, and then end once the source completes" in {
-      val trigger = Source.actorRef(1, OverflowStrategy.fail)
+    
+    "process nested sources with the same key out of order" in {
+      def getSource(elem: InElem) = Source.repeat(elem.value).map { i =>
+        Thread.sleep(Random.nextInt(5))
+        i
+      }.take(100)
       val (sink, source) = FanoutAndMerge(getKey, getSource)
-      val received = TestProbe()
-      source.runWith(Sink.actorRef(received.ref, "completed"))
-      val triggerActor = trigger.toMat(sink)(Keep.left).run()
-
-      triggerActor ! InElem(1)
-      for (i <- 1 to 200) received.expectMsgType[Int]
-
-      // the source must have completed since we've received the last element. Sleep a bit to be sure.
-      Thread.sleep(10)
-
-      triggerActor ! InElem(1)
-      for (i <- 1 to 200) received.expectMsgType[Int]
-
-      // let's end the stream.
-      system.stop(triggerActor)
-      received.expectMsg("completed")
+      Source(List(InElem(1,"one"), InElem(1,"two"), InElem(1,"three"), InElem(1,"four"))).runWith(sink)
+      
+      val result = source.runWith(toSequence).futureValue
+      result should have size(4 * 100)
+      result should contain only ("one", "two", "three", "four")
+      result should not contain inOrderOnly ("one", "two", "three", "four")
+      result.filter(_ == "one") should have size(100)
+      result.filter(_ == "two") should have size(100)
+      result.filter(_ == "three") should have size(100)
+      result.filter(_ == "four") should have size(100)
     }
+    
+    "resume processing after reaching a state where all substreams have completed and nothing was queued" in {
+      def getSource(elem: InElem) = Source.single(elem)
+      val (sink, source) = FanoutAndMerge(getKey, getSource)
+      val trigger = Source.actorRef[InElem](1, OverflowStrategy.fail).toMat(sink)(Keep.left).run()
+      val receiver = TestProbe()
+      source.runWith(Sink.actorRef(receiver.ref, "done"))
+      
+      trigger ! InElem(1,"1.1")
+      trigger ! InElem(1,"1.2")
+      trigger ! InElem(1,"1.3")
+      receiver.expectMsgType[InElem].key should be (1)
+      receiver.expectMsgType[InElem].key should be (1)
+      receiver.expectMsgType[InElem].key should be (1)
+      
+      Thread.sleep(100) // Allow the intermediate FanoutActor to discover all sub-streams have completed
+      
+      trigger ! InElem(2,"2.1")
+      receiver.expectMsgType[InElem].key should be (2)
+    }
+    
+    "detect when the sink's flow has errored, and forward the error to the source" in {
+      def getSource(elem: InElem) = Source.single(elem)
+      val (sink, source) = FanoutAndMerge(getKey, getSource)
+      val trigger = Source.actorRef[InElem](1, OverflowStrategy.fail).toMat(sink)(Keep.left).run()
+      val receiver = TestProbe()
+      source.runWith(Sink.actorRef(receiver.ref, "done"))
+      
+      trigger ! Failure(new RuntimeException("oh-no"))
+      val failure = receiver.expectMsgType[Failure]
+      failure.cause shouldBe a[RuntimeException]
+      failure.cause.getMessage should be("oh-no")
+    }
+    
+    "detect when one of the substream flows has errored, and forward the error to the source" in {
+      import system.dispatcher
+      def getSource(elem: InElem) = Source(Future { throw new RuntimeException("oh-no") })
+      val (sink, source) = FanoutAndMerge(getKey, getSource)
+      val trigger = Source.actorRef[InElem](1, OverflowStrategy.fail).toMat(sink)(Keep.left).run()
+      val receiver = TestProbe()
+      source.runWith(Sink.actorRef(receiver.ref, "done"))
+      
+      trigger ! InElem(1,"1")
+      val failure = receiver.expectMsgType[Failure]
+      failure.cause shouldBe a[RuntimeException]
+      failure.cause.getMessage should be("oh-no")      
+    }
+    
   }
 }

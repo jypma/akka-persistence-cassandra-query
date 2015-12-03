@@ -12,6 +12,10 @@ import akka.actor.ActorLogging
 import akka.actor.ActorRef
 import akka.actor.Actor
 import akka.actor.Terminated
+import akka.cluster.pubsub.DistributedPubSub
+import akka.cluster.pubsub.DistributedPubSubMediator
+import akka.ConfigurationException
+import akka.actor.Cancellable
 
 /**
  * Actor which publishes index entries as they become visible in cassandra.
@@ -20,7 +24,7 @@ class IndexEntryPoller(
     cassandraOps: CassandraOps,
 
     // longest time window ever stored + allowed clock drift
-    extendedTimeWindowLength:Duration = Duration.ofSeconds(120),
+    extendedTimeWindowLength:Duration,
 
     pollDelay:FiniteDuration = 5.seconds,
 
@@ -37,11 +41,25 @@ class IndexEntryPoller(
   def allTimeWindowsClosed = nowFunc minus extendedTimeWindowLength
 
   def receive = { case _ => }
-  context.become(polling(start = allTimeWindowsClosed, previousEvents = None))
+  
+  try {
+    DistributedPubSub(context.system).mediator ! DistributedPubSubMediator.Subscribe(s"persistenceIndex", self)
+  } catch {
+    case x:ConfigurationException => 
+      // ignore. If the Cluster extension isn't available, we simply don't listen to topic messages.
+  }
+  
+  become(querying(start = allTimeWindowsClosed, previousEvents = None))
 
-  def polling(start: Instant, previousEvents: Option[Set[IndexEntry]]): Receive = {
+  def becomeQuerying(entries:TreeSet[IndexEntry]): Unit = {
+    val threshold = allTimeWindowsClosed
+    become(querying(threshold, Some(entriesToRemember(threshold, entries))))    
+  }
+  
+  def querying(start: Instant, previousEvents: Option[Set[IndexEntry]]): Receive = {
     log.debug("Polling from {}", start);
     var entries = TreeSet.empty[IndexEntry](Ordering.by { i => (i.window_start, i.persistenceId) })
+    var immediateRepoll = false
     concatOpt(
       cassandraOps.readIndexEntriesOnSameDaySince(start),
       nextDayWithinExtendedTimeWindow(start).map { nextDay =>
@@ -66,30 +84,51 @@ class IndexEntryPoller(
         	  deliverQueue()
           }
         }
-        context.system.scheduler.scheduleOnce(pollDelay, self, Repoll)
+        if (immediateRepoll) {
+          becomeQuerying(entries)
+        } else {
+          val scheduledRepoll = context.system.scheduler.scheduleOnce(pollDelay, self, Repoll)
+          become(sleeping(entries, scheduledRepoll))          
+        }
 
-      case Repoll =>
-        val threshold = allTimeWindowsClosed
-        context become polling(threshold, Some(entriesToRemember(threshold, entries)))
-
-      case Subscribe =>
-        log.debug("Subscribed {}", sender)
-        context.watch(sender)
-        targets += sender
-
-      case Terminated(actor) =>
-        log.debug("Lost {}", sender)
-        targets -= actor
+      // This is the message posted to the DistributedPubSub topic
+      case s:String if s.startsWith("added") =>
+        log.debug("Seen added during query!")
+        immediateRepoll = true
     }
   }
+  
+  def sleeping(entries:TreeSet[IndexEntry], scheduledRepoll: Cancellable): Receive = {
+    case Repoll =>
+      becomeQuerying(entries)
 
+    // This is the message posted to the DistributedPubSub topic
+    case s:String if s.startsWith("added") =>
+      log.debug("Seen added during sleep!")
+      scheduledRepoll.cancel()
+      becomeQuerying(entries)
+  }
+
+  def handleSubscriptions: Receive = {
+    case Subscribe =>
+      log.debug("Subscribed {}", sender)
+      context.watch(sender)
+      targets += sender
+
+    case Terminated(actor) =>
+      log.debug("Lost {}", sender)
+      targets -= actor    
+  }
+  
+  def become(handler: Receive): Unit = context.become(handler.orElse(handleSubscriptions))
+  
   /**
    * Returns the entries from [candidates] that are after [threshold]
    */
   def entriesToRemember(threshold: Instant, candidates: TreeSet[IndexEntry]): Set[IndexEntry] = {
     candidates.from(IndexEntry(window_start = threshold, persistenceId = "",
         // the subsequent fields are not used for sorting, but are required to instantiate an IndexEntry
-        yearMonthDay = 0, firstSequenceNrInWindow = 0, partitionNr = 0))
+        window_length = 0, yearMonthDay = 0, firstSequenceNrInWindow = 0, partitionNr = 0))
   }
 
   /**

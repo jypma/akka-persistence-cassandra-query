@@ -73,7 +73,7 @@ class CassandraOpsSpec extends WordSpec with Matchers with ScalaFutures with Sha
   "CassandraOps.readEvents" when {
     "having events stored across several partitions" should {
       "read all events and then complete" in new Fixture(
-          index = Seq(IndexEntry(20151013, Instant.ofEpochSecond(1444727657l), "doc-1", 1, 0)),
+          index = Seq(IndexEntry(20151013, Instant.ofEpochSecond(1444727657l), 60000, "doc-1", 1, 0)),
           events = Seq(EventEnvelope(1444727657l, "doc-1", 1, 1),
                        EventEnvelope(1444727657l, "doc-1", 2, 2),
                        EventEnvelope(1444727657l, "doc-1", 3, 3),
@@ -98,7 +98,7 @@ class CassandraOpsSpec extends WordSpec with Matchers with ScalaFutures with Sha
       // polling from all calls to .readEvents() anyways.
       
       "stop reading when it sees a gap" in new Fixture(
-          index = Seq(IndexEntry(20151013, Instant.ofEpochSecond(1444727657l), "doc-1", 1, 0)),
+          index = Seq(IndexEntry(20151013, Instant.ofEpochSecond(1444727657l), 60000, "doc-1", 1, 0)),
           events = Seq(EventEnvelope(1444727657l, "doc-1", 1, 1),
                        EventEnvelope(1444727657l, "doc-1", 3, 3))
         ) {

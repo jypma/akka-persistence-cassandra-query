@@ -31,6 +31,8 @@ import akka.stream.scaladsl.Keep
 import scala.concurrent.Future
 import akka.persistence.cassandra.streams.Reaper
 import akka.stream.OverflowStrategy
+import com.typesafe.scalalogging.StrictLogging
+import scala.concurrent.duration.DurationInt
 
 /**
  * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
@@ -41,7 +43,7 @@ import akka.stream.OverflowStrategy
 class CassandraReadJournal(
     system: ExtendedActorSystem,
     config: Config
-) extends ReadJournalProvider with ReadJournal with EventsByTagQuery {
+) extends ReadJournalProvider with ReadJournal with EventsByTagQuery with StrictLogging {
   import system.dispatcher
 
   override def scaladslReadJournal() = this
@@ -61,16 +63,19 @@ class CassandraReadJournal(
       s"${journalConfig.keyspace}.${journalConfig.timeIndexTable}",
       journalConfig.targetPartitionSize)
 
-  private val realtimeActor = system.actorOf(Props(new IndexEntryPoller(cassandraOps)))
+  val extendedTimeWindowLength = config.getDuration("extendedTimeWindowLength")
+  val allowedClockDrift = config.getDuration("allowedClockDrift")
+  
+  private val realtimeActor = system.actorOf(Props(new IndexEntryPoller(cassandraOps, extendedTimeWindowLength)))
   private val realtimeIndex = Source.actorRef(16, OverflowStrategy.fail).mapMaterializedValue { actor =>
     realtimeActor.tell(IndexEntryPoller.Subscribe, actor)
-  }.log("realtimeIndex")
+  }
 
   /**
    * Manages the pool of sources that emit real-time events for a given persistenceId.
    */
   private val realtimeEvents = SourcePool(PersistenceIdEventsPoller.Subscribe, 256) { persistenceId: String =>
-    Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId))
+    PersistenceIdEventsPoller.props(cassandraOps, persistenceId, extendedTimeWindowLength)
   }
 
   /**
@@ -80,13 +85,16 @@ class CassandraReadJournal(
    * The returned `EventEnvelope` items have their `offset` set to the event's timestamp,
    * and `payload` set to an instance of {@link EventPayload}
    */
+  
   override def eventsByTag(tag: String, offset: Long): Source[EventEnvelope, Unit] = {
-    //FIXME uhm we should be using offset somewhere???
-
-    val (sink, source) = FanoutAndMerge(byPersistenceId, getEvents)
+    val start = indexChronology.latest(
+      indexChronology.beginningOfTime, 
+      Instant.ofEpochMilli(offset) minus journalConfig.timeWindowLength)
+    
+    val (sink, source) = FanoutAndMerge(byTimeWindow, getEvents)
 
     // Combine past index entries and new, real-time ones into a single logical Source
-    RealTime(cassandraOps.pastIndex, realtimeIndex)
+    RealTime(cassandraOps.pastIndex, realtimeIndex, start)
 
       // Filter out duplicate persistenceIds within the same time window
       .transform{ () => new SortedFilterDuplicate[IndexEntry,Instant,String](_.window_start)(_.persistenceId) }
@@ -97,7 +105,7 @@ class CassandraReadJournal(
     source
   }
 
-  private def byPersistenceId(i:IndexEntry) = i.persistenceId
+  private def byTimeWindow(i:IndexEntry) = i.window_start
 
   /**
    * Queries the cassandra index, and then gets the actual events, for the given time window interval, once.
@@ -106,11 +114,25 @@ class CassandraReadJournal(
     cassandraOps.readEvents(persistenceId)(fromSequenceNr, toSequenceNr)
 
   /**
-   * Returns a source that combines all past events for [entry.persistenceId] and then
-   * turns to real-time.
+   * Returns a source that returns the events made for the time window of the given
+   * index entry. If that time window might still be open, the source will pause and become real-time,
+   * until the time window is no longer open. If the time window is historic, the source will  
+   * just complete after returning all the events.
    */
   private def getEvents(entry: IndexEntry): Source[EventEnvelope,Any] = {
-    RealTime(cassandraOps.readEvents(entry.persistenceId), realtimeEvents(entry.persistenceId))
+    val remaining = entry.remainingTimeAt(now.minus(allowedClockDrift))
+    
+    if (remaining.isDefined) {
+      RealTime(
+        cassandraOps.readEvents(entry.persistenceId), 
+        realtimeEvents(entry.persistenceId), 
+        entry.firstSequenceNrInWindow
+      )
+      .takeWithin(remaining.get)
+    } else {
+      cassandraOps.readEvents(entry.persistenceId)(entry.firstSequenceNrInWindow, eventChronology.endOfTime)
+    }
+    .takeWhile(entry.isEventInTimeWindow(_))
   }
 
   /**

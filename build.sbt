@@ -2,7 +2,7 @@ organization := "com.tradeshift"
 
 name := "akka-persistence-cassandra-query"
 
-version := "0.1-201511031256"
+version := "0.1-201512011153"
 
 licenses += ("MIT", url("http://opensource.org/licenses/MIT"))
 
@@ -23,6 +23,7 @@ libraryDependencies ++= {
     "com.typesafe.akka" %% "akka-testkit" % akkaVersion % "test",
     "com.typesafe.akka" %% "akka-slf4j" % akkaVersion % "test",
     "com.typesafe.akka" %% "akka-persistence" % akkaVersion,
+    "com.typesafe.akka" %% "akka-cluster-tools" % akkaVersion,
     "com.typesafe.akka" %% "akka-persistence-query-experimental" % akkaVersion,
     "com.typesafe.akka" %% "akka-http-experimental" % akkaStreamVersion
   )
@@ -31,7 +32,7 @@ libraryDependencies ++= {
 libraryDependencies += "org.iq80.leveldb" % "leveldb" % "0.7" % "test" // only to make eclipse happy, we're not using it.
 
 // source: https://github.com/jypma/akka-persistence-cassandra/tree/time_index_dev
-libraryDependencies += "com.github.krasserm" %% "akka-persistence-cassandra" % "0.5-jypma-201511031129"
+libraryDependencies += "com.github.krasserm" %% "akka-persistence-cassandra" % "0.5-jypma-201511241013"
 
 libraryDependencies += "com.datastax.cassandra"  % "cassandra-driver-core" % "2.1.8"
 

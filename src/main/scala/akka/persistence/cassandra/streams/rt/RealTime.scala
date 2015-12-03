@@ -26,6 +26,7 @@ object RealTime extends StrictLogging {
    */
   def apply[Elem,Time](getPast: (Time, Time) => Source[Elem,Any],
                        realtime: Source[Elem,Any],
+                       offset: Time,
                        pollInterval : FiniteDuration = 5.seconds)
                       (implicit system:ActorSystem, chronology:Chronology[Elem,Time]): Source[Elem, ActorRef] = {
 
@@ -58,8 +59,8 @@ object RealTime extends StrictLogging {
       def initial = new State {
         def onPush(msg: Any, ctx: Context[Elem]) = msg match {
           case ref:ActorRef =>
-            ref ! chronology.beginningOfTime
-            become(catchingUp(ref, chronology.beginningOfTime))
+            ref ! chronology.latest(chronology.beginningOfTime, offset)
+            become(catchingUp(ref, offset))
             ctx.pull()
         }
       }
@@ -69,6 +70,7 @@ object RealTime extends StrictLogging {
        * with real-time.
        */
       def catchingUp(timeActor: ActorRef, from: Time): State = new State {
+        logger.info(s"Now catching up from $from") 
         var lastRealtime: Option[Time] = None
         var lastPast: Option[Time] = None
         var realtimeCompleted:Boolean = false
@@ -80,6 +82,7 @@ object RealTime extends StrictLogging {
             ctx.pull()
 
           case RealTimeElem(elem) =>
+            logger.debug(s"Real-time elem $elem")
             lastRealtime = Some(chronology.getTime(elem))
             ctx.pull()
 
@@ -125,6 +128,7 @@ object RealTime extends StrictLogging {
             }
 
           case mustBeElem => // everything else is forwarded from the incoming "past" stream
+            logger.debug(s"Past elem $mustBeElem")
             val elem = mustBeElem.asInstanceOf[Elem]
             lastPast = Some(chronology.getTime(elem))
             ctx.push(elem)
