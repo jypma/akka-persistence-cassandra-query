@@ -146,9 +146,9 @@ class CassandraReadJournalIntegrationSpec extends TestKit(ActorSystem("test", co
 
         for (i <- 0 to messageCount) {
           val q = queries(i)
-          q.within(1.minute) {
+          q.within(5.minutes) {
             for (j <- 0 to messageCount) {
-              //println(s"*** Waiting for query $i, message $j") 
+              println(s"*** Waiting for query $i, message $j") 
             	q.expectMsgType[EventEnvelope]
             }
           }
