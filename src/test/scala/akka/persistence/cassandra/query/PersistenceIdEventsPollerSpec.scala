@@ -17,6 +17,7 @@ import akka.stream.scaladsl.{ Keep, Sink, Source }
 import akka.testkit.TestProbe
 import akka.cluster.pubsub.DistributedPubSub
 import akka.cluster.pubsub.DistributedPubSubMediator.Publish
+import akka.cluster.pubsub.DistributedPubSubMediator
 
 class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
@@ -40,9 +41,11 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
         }
       })
 
+      val pubsub = TestProbe()
       val emitted = TestProbe()
-      val poller = system.actorOf(Props(
-        new PersistenceIdEventsPoller(cassandraOps, "doc1", Duration.ofSeconds(120), pollDelay = 200.milliseconds, nowFunc = now)))
+      val poller = system.actorOf(
+        PersistenceIdEventsPoller.props(cassandraOps, "doc1", Duration.ofSeconds(120), 
+          pollDelay = 200.milliseconds, nowFunc = now, pubsub = Some(pubsub.ref)))
       emitted.send(poller, PersistenceIdEventsPoller.Subscribe)
 
       // Allow the publisher to pick up the initialEvents (which it'll do shortly after having queried for initialTime)
@@ -73,9 +76,11 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
       }
       
       "emit any new events that appear in the db immediately if pubsub publishes an event" in fixture() { f =>
+        f.pubsub.expectMsg(DistributedPubSubMediator.Subscribe("persistenceId:doc1", f.poller))
+        
         val event = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello")
         f.events :+= event
-        pubsub ! Publish("persistenceId:doc1", "added:1")
+        f.poller ! "added:1"
         f.emitted.within(100.milliseconds) {
           f.emitted.expectMsg(event)
         }

@@ -75,7 +75,7 @@ class CassandraReadJournal(
    * Manages the pool of sources that emit real-time events for a given persistenceId.
    */
   private val realtimeEvents = SourcePool(PersistenceIdEventsPoller.Subscribe, 256) { persistenceId: String =>
-    Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId, extendedTimeWindowLength))
+    PersistenceIdEventsPoller.props(cassandraOps, persistenceId, extendedTimeWindowLength)
   }
 
   /**

@@ -14,11 +14,14 @@ import akka.cluster.pubsub.DistributedPubSub
 import akka.cluster.pubsub.DistributedPubSubMediator
 import akka.actor.Cancellable
 import akka.ConfigurationException
+import akka.actor.Props
+import akka.actor.ActorSystem
+import scala.util.Try
 
 /**
  * Actor which publishes messages as they become visible in cassandra, for a specific persistenceId.
  */
-class PersistenceIdEventsPoller(
+class PersistenceIdEventsPoller private (
     cassandraOps: CassandraOps,
     persistenceId: String,
     // longest time window ever stored + allowed clock drift
@@ -27,7 +30,8 @@ class PersistenceIdEventsPoller(
     nowFunc: => Instant = Instant.now,
     // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
     // Remember this is PER concurrently accessed persistenceId.
-    maximumQueueSize: Int = 100
+    maximumQueueSize: Int = 100,
+    pubsub: Option[ActorRef] = None // ActorRef to use for pubsub instead of real DistributedPubSub, for testing
 )(implicit m:Materializer) extends Actor with ActorLogging {
   import context.dispatcher
 
@@ -40,12 +44,7 @@ class PersistenceIdEventsPoller(
 
   def receive = { case _ => }
   
-  try {
-    DistributedPubSub(context.system).mediator ! DistributedPubSubMediator.Subscribe(s"persistenceId:$persistenceId", self)
-  } catch {
-    case x:ConfigurationException => 
-      // ignore. If the Cluster extension isn't available, we simply don't listen to topic messages.
-  }
+  pubsub.foreach(_ ! DistributedPubSubMediator.Subscribe(s"persistenceId:$persistenceId", self))
   
   become(polling(cassandraOps.findHighestSequenceNr(persistenceId), None))
 
@@ -142,6 +141,24 @@ class PersistenceIdEventsPoller(
 }
 
 object PersistenceIdEventsPoller {
+  def props(
+    cassandraOps: CassandraOps,
+    persistenceId: String,
+    // longest time window ever stored + allowed clock drift
+    extendedTimeWindowLength:Duration,
+    pollDelay: FiniteDuration = 5.seconds,
+    nowFunc: => Instant = Instant.now,
+    // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
+    // Remember this is PER concurrently accessed persistenceId.
+    maximumQueueSize: Int = 100,
+    pubsub: Option[ActorRef] = None // ActorRef to use for pubsub instead of real DistributedPubSub, for testing
+  )(implicit system:ActorSystem, m:Materializer) = {
+    val actualPubSub = pubsub orElse Try(DistributedPubSub(system).mediator).toOption 
+    
+    Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId, extendedTimeWindowLength, pollDelay,
+      nowFunc, maximumQueueSize, actualPubSub))
+  }
+      
   case object Subscribe
 
   private case object CassandraDone
