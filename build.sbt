@@ -2,7 +2,7 @@ organization := "com.tradeshift"
 
 name := "akka-persistence-cassandra-query"
 
-version := "0.1-201511261507"
+version := "0.1-201512011153"
 
 licenses += ("MIT", url("http://opensource.org/licenses/MIT"))
 

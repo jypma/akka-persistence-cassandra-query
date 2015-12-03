@@ -191,7 +191,9 @@ object FanoutAndMerge {
 
 	  case object LogQueue
 	  import context.dispatcher
-	  val debugTimer = context.system.scheduler.schedule(200.milliseconds, 200.milliseconds, self, LogQueue)
+	  if (log.isDebugEnabled) {
+	    val debugTimer = context.system.scheduler.schedule(200.milliseconds, 200.milliseconds, self, LogQueue)	    
+	  }
 	  
 	  out ! Register(self)
 
