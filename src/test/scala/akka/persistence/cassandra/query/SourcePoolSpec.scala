@@ -30,7 +30,7 @@ class SourcePoolSpec extends WordSpec with Matchers with Eventually with SharedA
   }
 
   "SourcePool" when {
-    "handling a source with one element" should {
+    "handling a child actor that dies after emitting one element" should {
       "call the factory again once its actor has ended" in {
         var invocations = 0
         val pool = SourcePool("subscribe",1) { key: Int => invocations += 1; Props(new SingleRequestActor(key)) }

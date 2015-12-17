@@ -13,6 +13,7 @@ import java.time.Instant
 import java.time.Instant
 import java.util.Date
 import java.util.concurrent.atomic.AtomicInteger
+import akka.persistence.cassandra.journal.FixedRetryPolicy
 
 trait Cassandra {
   import Cassandra._
@@ -42,12 +43,14 @@ object Cassandra {
   def apply(system: ActorSystem) = new Cassandra {
     import system.dispatcher
 
+    val queryConfig = CassandraReadJournalConfig(system)
     val config = new CassandraJournalConfig(system.settings.config.getConfig("cassandra-journal"))
-    val cluster = config.clusterBuilder.build
+    val policy = new FixedRetryPolicy(queryConfig.selectRetries)
+    val cluster = config.clusterBuilder.withRetryPolicy(policy).build
     val session = cluster.connect()
 
     override def prepareSelect[T: RowMapper](cql: String, fetchSize: Int = 0) = new PreparedSelectStatement[T] {
-      val preparedStmt = session.prepare(cql).setConsistencyLevel(config.readConsistency)
+      val preparedStmt = session.prepare(cql).setConsistencyLevel(config.readConsistency).setRetryPolicy(policy)
 
       def mkStatement(args: Seq[Any]) = {
         val stmt = preparedStmt.bind(args.map {
@@ -63,7 +66,7 @@ object Cassandra {
       }
 
       override def execute(args: Any*): Source[T, Any] = {
-    	  ResultSetActorPublisher.source(session.executeAsync(mkStatement(args)), implicitly[RowMapper[T]])
+    	  ResultSetActorPublisher.source(session.executeAsync(mkStatement(args)), queryConfig, implicitly[RowMapper[T]])
       }
 
       override def executeBlocking(args: Any*): Iterator[T] = blocking {

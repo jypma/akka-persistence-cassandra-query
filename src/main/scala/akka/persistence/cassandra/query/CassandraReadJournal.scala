@@ -33,6 +33,7 @@ import akka.persistence.cassandra.streams.Reaper
 import akka.stream.OverflowStrategy
 import com.typesafe.scalalogging.StrictLogging
 import scala.concurrent.duration.DurationInt
+import akka.persistence.cassandra.CassandraReadJournalConfig
 
 /**
  * Implementation of akka persistence read journal, for the akka-persistence-cassandra plugin
@@ -42,10 +43,11 @@ import scala.concurrent.duration.DurationInt
  */
 class CassandraReadJournal(
     system: ExtendedActorSystem,
-    config: Config
+    cfg: Config
 ) extends ReadJournalProvider with ReadJournal with EventsByTagQuery with StrictLogging {
   import system.dispatcher
 
+  val config= CassandraReadJournalConfig(cfg)
   override def scaladslReadJournal() = this
 
   override def javadslReadJournal() = new japi.CassandraReadJournal(this)
@@ -63,10 +65,8 @@ class CassandraReadJournal(
       s"${journalConfig.keyspace}.${journalConfig.timeIndexTable}",
       journalConfig.targetPartitionSize)
 
-  val extendedTimeWindowLength = config.getDuration("extendedTimeWindowLength")
-  val allowedClockDrift = config.getDuration("allowedClockDrift")
-  
-  private val realtimeActor = system.actorOf(Props(new IndexEntryPoller(cassandraOps, extendedTimeWindowLength)))
+  private val realtimeActorWorker = Props(new IndexEntryPollerWorker(cassandraOps, config.extendedTimeWindowLength))
+  private val realtimeActor = system.actorOf(Props(new IndexEntryPoller(realtimeActorWorker)))
   private val realtimeIndex = Source.actorRef(16, OverflowStrategy.fail).mapMaterializedValue { actor =>
     realtimeActor.tell(IndexEntryPoller.Subscribe, actor)
   }
@@ -75,7 +75,7 @@ class CassandraReadJournal(
    * Manages the pool of sources that emit real-time events for a given persistenceId.
    */
   private val realtimeEvents = SourcePool(PersistenceIdEventsPoller.Subscribe, 256) { persistenceId: String =>
-    PersistenceIdEventsPoller.props(cassandraOps, persistenceId, extendedTimeWindowLength)
+    PersistenceIdEventsPoller.props(cassandraOps, persistenceId, config.extendedTimeWindowLength)
   }
 
   /**
@@ -120,7 +120,7 @@ class CassandraReadJournal(
    * just complete after returning all the events.
    */
   private def getEvents(entry: IndexEntry): Source[EventEnvelope,Any] = {
-    val remaining = entry.remainingTimeAt(now.minus(allowedClockDrift))
+    val remaining = entry.remainingTimeAt(now.minus(config.allowedClockDrift))
     
     if (remaining.isDefined) {
       RealTime(
