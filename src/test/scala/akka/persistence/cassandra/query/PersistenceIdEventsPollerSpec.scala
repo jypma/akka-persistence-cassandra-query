@@ -3,8 +3,6 @@ package akka.persistence.cassandra.query
 import java.time.Instant
 import java.time.Duration
 import scala.concurrent.duration.DurationInt
-import org.mockito.Matchers.{ anyLong, eq => is }
-import org.mockito.Mockito.{ atLeastOnce, mock, verify, when }
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.scalatest.{ Finders, Matchers, WordSpec }
@@ -18,8 +16,10 @@ import akka.testkit.TestProbe
 import akka.cluster.pubsub.DistributedPubSub
 import akka.cluster.pubsub.DistributedPubSubMediator.Publish
 import akka.cluster.pubsub.DistributedPubSubMediator
+import akka.persistence.cassandra.MockitoOps
 
-class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with SharedActorSystem {
+class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFutures with Eventually with MockitoOps 
+  with SharedActorSystem {
   implicit val patience = PatienceConfig(timeout = Span(10, Seconds))
   val pubsub = DistributedPubSub(system).mediator
 
@@ -30,16 +30,18 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
       @volatile var events = initialEvents
 
       var now: Instant = startTime
-      val cassandraOps = mock(classOf[CassandraOps])
-      when(cassandraOps.findHighestSequenceNr("doc1")).thenAnswer(new Answer[Int] {
+      val cassandraOps = mock[CassandraOps]
+      when(cassandraOps.findHighestSequenceNr("doc1")) thenAnswer new Answer[Int] {
         override def answer(invocation: InvocationOnMock) = events.size
-      })
-      when(cassandraOps.readEvents(is("doc1"))(anyLong, is(Long.MaxValue))).thenAnswer(new Answer[Source[EventEnvelope,Any]] {
+      }
+      
+      
+      when(cassandraOps.readEvents("doc1":=)(?, Long.MaxValue:=)) thenAnswer new Answer[Source[EventEnvelope,Any]] {
         override def answer(invocation: InvocationOnMock) = {
           val from = invocation.getArgumentAt(1, classOf[Long]).toInt
           Source(events.drop(from - 1).toList)
         }
-      })
+      }
 
       val pubsub = TestProbe()
       val emitted = TestProbe()
@@ -112,6 +114,24 @@ class PersistenceIdEventsPollerSpec extends WordSpec with Matchers with ScalaFut
         f.emitted.expectMsg(event)
         f.now = f.now plusMillis 300000
         f.emitted.expectTerminated(f.poller, 2.seconds)
+      }
+    }
+    
+    "encountering errors during polling" should {
+      "sleep and poll again" in fixture() { f =>
+        val x = new RuntimeException("Simulated failure")
+        when(f.cassandraOps.readEvents("doc1":=)(?, Long.MaxValue:=)).thenReturn(Source.failed(x))
+        Thread.sleep(400) // poll delay * 2
+
+        when(f.cassandraOps.readEvents("doc1":=)(?, Long.MaxValue:=)) thenAnswer new Answer[Source[EventEnvelope,Any]] {
+          override def answer(invocation: InvocationOnMock) = {
+            val from = invocation.getArgumentAt(1, classOf[Long]).toInt
+            Source(f.events.drop(from - 1).toList)
+          }
+        }
+        val event = EventEnvelope(startTime.toEpochMilli, "doc1", 1, "hello")
+        f.events :+= event
+        f.emitted.expectMsg(event)        
       }
     }
   }

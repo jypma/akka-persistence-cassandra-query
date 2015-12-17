@@ -17,6 +17,7 @@ import akka.ConfigurationException
 import akka.actor.Props
 import akka.actor.ActorSystem
 import scala.util.Try
+import akka.actor.Status.Failure
 
 /**
  * Actor which publishes messages as they become visible in cassandra, for a specific persistenceId.
@@ -69,6 +70,11 @@ class PersistenceIdEventsPoller private (
     var immediateRepoll = false
 
     {
+      case Failure(cause) =>
+        log.warning("Poll query failed: {}. Re-polling in {}.", cause, pollDelay)
+        val scheduledRepoll = context.system.scheduler.scheduleOnce(pollDelay, self, Repoll)
+        become(queryComplete(highestSeenSeqNr, highestSeenOffset, scheduledRepoll))                  
+        
       case event:EventEnvelope =>
         if (event.sequenceNr < highestSeenSeqNr) {
           throw new IllegalStateException(

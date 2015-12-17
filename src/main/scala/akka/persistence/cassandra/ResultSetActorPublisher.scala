@@ -12,13 +12,19 @@ import akka.actor.Stash
 import akka.stream.scaladsl.Source
 import Cassandra.RowMapper
 import akka.actor.ActorLogging
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.duration.Duration
+import java.util.concurrent.TimeoutException
+import com.datastax.driver.core.ResultSetFuture
+import java.util.concurrent.TimeUnit
 
 object ResultSetActorPublisher {
-  def source[T](resultSet: Future[ResultSet], rowMapper: RowMapper[T]) =
-    Source.actorPublisher[T](Props(new ResultSetActorPublisher(resultSet, rowMapper)))
+  def source[T](resultSet: ResultSetFuture, config: CassandraReadJournalConfig, rowMapper: RowMapper[T]) =
+    Source.actorPublisher[T](Props(new ResultSetActorPublisher(resultSet, config, rowMapper)))
 
   private case object RowsFetched
   private case class ResultSetReady(resultSet: ResultSet)
+  private case object ExecTimeout
 }
 
 /**
@@ -26,20 +32,29 @@ object ResultSetActorPublisher {
  * by invoking Source.actorPublisher(...).
  */
 class ResultSetActorPublisher[T](
-    resultSetFuture: Future[ResultSet], implicit val rowMapper: RowMapper[T]
+    resultSetFuture: ResultSetFuture,
+    config: CassandraReadJournalConfig,
+    implicit val rowMapper: RowMapper[T]
 ) extends ActorPublisher[T] with Stash with ActorLogging {
 
   import context.dispatcher
+  val execTimeout = Duration(config.execTimeout.toMillis(), TimeUnit.MILLISECONDS)
 
   resultSetFuture map ResultSetReady pipeTo self
+  val timeoutSchedule = context.system.scheduler.scheduleOnce(execTimeout, self, ExecTimeout)
 
   def receive = {
     case ResultSetReady(resultSet) =>
+      timeoutSchedule.cancel()
       log.debug("Resultset is ready with {} available results, exhausted: {}",
           resultSet.getAvailableWithoutFetching, resultSet.isExhausted)
       context become ready(resultSet)
       deliver(resultSet)
       unstashAll()
+      
+    case ExecTimeout =>
+      resultSetFuture.cancel(true)
+      onErrorThenStop(new TimeoutException(s"Timed out after ${execTimeout} while waiting for query to start executing"))         
 
     case Request(_) =>
       // ignore for now
