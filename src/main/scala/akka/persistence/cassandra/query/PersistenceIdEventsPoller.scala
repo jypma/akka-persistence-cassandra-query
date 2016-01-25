@@ -28,10 +28,10 @@ class PersistenceIdEventsPoller private (
     // longest time window ever stored + allowed clock drift
     extendedTimeWindowLength:Duration,
     pollDelay: FiniteDuration = 5.seconds,
-    nowFunc: => Instant = Instant.now,
     // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
     // Remember this is PER concurrently accessed persistenceId.
     maximumQueueSize: Int = 100,
+    nowFunc: => Instant = Instant.now,
     pubsub: Option[ActorRef] = None // ActorRef to use for pubsub instead of real DistributedPubSub, for testing
 )(implicit m:Materializer) extends Actor with ActorLogging {
   import context.dispatcher
@@ -153,16 +153,16 @@ object PersistenceIdEventsPoller {
     // longest time window ever stored + allowed clock drift
     extendedTimeWindowLength:Duration,
     pollDelay: FiniteDuration = 5.seconds,
-    nowFunc: => Instant = Instant.now,
     // Maximum queue size should be the amount of memory we want to spend on slow real-time consumers.
     // Remember this is PER concurrently accessed persistenceId.
     maximumQueueSize: Int = 100,
+    nowFunc: => Instant = Instant.now,
     pubsub: Option[ActorRef] = None // ActorRef to use for pubsub instead of real DistributedPubSub, for testing
   )(implicit system:ActorSystem, m:Materializer) = {
     val actualPubSub = pubsub orElse Try(DistributedPubSub(system).mediator).toOption 
     
     Props(new PersistenceIdEventsPoller(cassandraOps, persistenceId, extendedTimeWindowLength, pollDelay,
-      nowFunc, maximumQueueSize, actualPubSub))
+      maximumQueueSize, nowFunc, actualPubSub))
   }
       
   case object Subscribe

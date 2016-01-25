@@ -65,7 +65,8 @@ class CassandraReadJournal(
       s"${journalConfig.keyspace}.${journalConfig.timeIndexTable}",
       journalConfig.targetPartitionSize)
 
-  private val realtimeActorWorker = Props(new IndexEntryPollerWorker(cassandraOps, config.extendedTimeWindowLength))
+  private val realtimeActorWorker = Props(new IndexEntryPollerWorker(cassandraOps, 
+    config.extendedTimeWindowLength, config.pollDelay, config.indexPollerQueueSize))
   private val realtimeActor = system.actorOf(Props(new IndexEntryPoller(realtimeActorWorker)))
   private val realtimeIndex = Source.actorRef(16, OverflowStrategy.fail).mapMaterializedValue { actor =>
     realtimeActor.tell(IndexEntryPoller.Subscribe, actor)
@@ -75,7 +76,8 @@ class CassandraReadJournal(
    * Manages the pool of sources that emit real-time events for a given persistenceId.
    */
   private val realtimeEvents = SourcePool(PersistenceIdEventsPoller.Subscribe, 256) { persistenceId: String =>
-    PersistenceIdEventsPoller.props(cassandraOps, persistenceId, config.extendedTimeWindowLength)
+    PersistenceIdEventsPoller.props(cassandraOps, persistenceId, 
+      config.extendedTimeWindowLength, config.pollDelay, config.eventsPollerQueueSize)
   }
 
   /**

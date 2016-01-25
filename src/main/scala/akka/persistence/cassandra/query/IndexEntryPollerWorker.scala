@@ -29,10 +29,10 @@ class IndexEntryPollerWorker(
 
     pollDelay:FiniteDuration = 5.seconds,
 
-    nowFunc: => Instant = Instant.now,
-
     // maximum queue size should be about 10 * (expected number of index entries during [extendedTimeWindowLength])
-    maximumQueueSize: Int = 100000
+    maximumQueueSize: Int = 100000,
+    
+    nowFunc: => Instant = Instant.now
   )(implicit m:Materializer) extends Actor with ActorLogging {
   import context.dispatcher
 
